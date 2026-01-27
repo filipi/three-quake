@@ -1,0 +1,1653 @@
+// Ported from: WinQuake/menu.c, WinQuake/menu.h -- menu system
+
+import { Cbuf_AddText } from './cmd.js';
+import { Cmd_AddCommand } from './cmd.js';
+import { Con_Printf, Con_ToggleConsole_f } from './console.js';
+import {
+	K_ESCAPE, K_ENTER, K_UPARROW, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW,
+	K_BACKSPACE,
+	key_game, key_console, key_menu, key_dest
+} from './keys.js';
+import { cl_forwardspeed, cl_backspeed } from './cl_input.js';
+import { sensitivity, m_pitch, lookspring, lookstrafe } from './cl_main.js';
+import { bgmvolume, volume } from './sound.js';
+import { Cvar_SetValue } from './cvar.js';
+import { scr_viewsize } from './gl_screen.js';
+import { v_gamma } from './view.js';
+
+/*
+==============================================================================
+
+			MENU STATES
+
+==============================================================================
+*/
+
+export const m_none = 0;
+export const m_main = 1;
+export const m_singleplayer = 2;
+export const m_load = 3;
+export const m_save = 4;
+export const m_multiplayer = 5;
+export const m_setup = 6;
+export const m_net = 7;
+export const m_options = 8;
+export const m_video = 9;
+export const m_keys = 10;
+export const m_help = 11;
+export const m_quit = 12;
+export const m_serialconfig = 13;
+export const m_modemconfig = 14;
+export const m_lanconfig = 15;
+export const m_gameoptions = 16;
+export const m_search = 17;
+export const m_slist = 18;
+
+export let m_state = m_none;
+export let m_entersound = false;
+let m_recursiveDraw = false;
+
+let m_return_state = 0;
+let m_return_onerror = false;
+let m_return_reason = '';
+
+let m_save_demonum = 0;
+
+/*
+==============================================================================
+
+			EXTERNAL REFERENCES
+
+==============================================================================
+*/
+
+// Set by external modules to avoid circular dependencies
+let _key_dest_set = null; // function to set key_dest
+let _key_dest_get = null; // function to get key_dest
+let _cls = { state: 0, demonum: - 1, demoplayback: false };
+let _sv = { active: false };
+let _svs = { maxclients: 1 };
+let _cl = { intermission: 0, gametype: 0 };
+let _realVid = { width: 640, height: 480 };
+const _vid = {
+	get width() { return Math.floor( _realVid.width / ( window.devicePixelRatio || 1 ) ); },
+	get height() { return Math.floor( _realVid.height / ( window.devicePixelRatio || 1 ) ); }
+};
+let _host_time_get = () => 0;
+let _realtime_get = () => 0;
+let _Draw_CachePic = null;
+let _Draw_TransPic = null;
+let _Draw_Pic = null;
+let _Draw_Character = null;
+let _Draw_Fill = null;
+let _Draw_FadeScreen = null;
+let _Draw_String = null;
+let _Draw_TransPicTranslate = null;
+let _S_LocalSound = null;
+let _SCR_BeginLoadingPlaque = null;
+let _SCR_ModalMessage = null;
+let _CL_NextDemo = null;
+
+export function M_SetExternals( externals ) {
+
+	if ( externals.key_dest_set ) _key_dest_set = externals.key_dest_set;
+	if ( externals.key_dest_get ) _key_dest_get = externals.key_dest_get;
+	if ( externals.cls ) _cls = externals.cls;
+	if ( externals.sv ) _sv = externals.sv;
+	if ( externals.svs ) _svs = externals.svs;
+	if ( externals.cl ) _cl = externals.cl;
+	if ( externals.vid ) _realVid = externals.vid;
+	if ( externals.Draw_CachePic ) _Draw_CachePic = externals.Draw_CachePic;
+	if ( externals.Draw_TransPic ) _Draw_TransPic = externals.Draw_TransPic;
+	if ( externals.Draw_Pic ) _Draw_Pic = externals.Draw_Pic;
+	if ( externals.Draw_Character ) _Draw_Character = externals.Draw_Character;
+	if ( externals.Draw_Fill ) _Draw_Fill = externals.Draw_Fill;
+	if ( externals.Draw_FadeScreen ) _Draw_FadeScreen = externals.Draw_FadeScreen;
+	if ( externals.Draw_String ) _Draw_String = externals.Draw_String;
+	if ( externals.S_LocalSound ) _S_LocalSound = externals.S_LocalSound;
+	if ( externals.SCR_BeginLoadingPlaque ) _SCR_BeginLoadingPlaque = externals.SCR_BeginLoadingPlaque;
+	if ( externals.host_time_get ) _host_time_get = externals.host_time_get;
+	if ( externals.realtime_get ) _realtime_get = externals.realtime_get;
+
+}
+
+function getKeyDest() {
+
+	return _key_dest_get ? _key_dest_get() : key_dest;
+
+}
+
+function setKeyDest( val ) {
+
+	if ( _key_dest_set ) _key_dest_set( val );
+
+}
+
+/*
+==============================================================================
+
+			DRAWING HELPERS
+
+==============================================================================
+*/
+
+/*
+================
+M_DrawCharacter
+
+Draws one solid graphics character
+================
+*/
+function M_DrawCharacter( cx, line, num ) {
+
+	if ( _Draw_Character )
+		_Draw_Character( cx + ( ( _vid.width - 320 ) >> 1 ), line, num );
+
+}
+
+function M_Print( cx, cy, str ) {
+
+	for ( let i = 0; i < str.length; i ++ ) {
+
+		M_DrawCharacter( cx, cy, str.charCodeAt( i ) + 128 );
+		cx += 8;
+
+	}
+
+}
+
+function M_PrintWhite( cx, cy, str ) {
+
+	for ( let i = 0; i < str.length; i ++ ) {
+
+		M_DrawCharacter( cx, cy, str.charCodeAt( i ) );
+		cx += 8;
+
+	}
+
+}
+
+function M_DrawTransPic( x, y, pic ) {
+
+	if ( _Draw_TransPic && pic )
+		_Draw_TransPic( x + ( ( _vid.width - 320 ) >> 1 ), y, pic );
+
+}
+
+function M_DrawPic( x, y, pic ) {
+
+	if ( _Draw_Pic && pic )
+		_Draw_Pic( x + ( ( _vid.width - 320 ) >> 1 ), y, pic );
+
+}
+
+export { M_DrawPic as M_DrawPic_export };
+
+function M_DrawTextBox( x, y, width, lines ) {
+
+	if ( ! _Draw_CachePic ) return;
+
+	let cx, cy, n;
+	let p;
+
+	// draw left side
+	cx = x;
+	cy = y;
+	p = _Draw_CachePic( 'gfx/box_tl.lmp' );
+	M_DrawTransPic( cx, cy, p );
+	p = _Draw_CachePic( 'gfx/box_ml.lmp' );
+	for ( n = 0; n < lines; n ++ ) {
+
+		cy += 8;
+		M_DrawTransPic( cx, cy, p );
+
+	}
+
+	p = _Draw_CachePic( 'gfx/box_bl.lmp' );
+	M_DrawTransPic( cx, cy + 8, p );
+
+	// draw middle
+	cx += 8;
+	while ( width > 0 ) {
+
+		cy = y;
+		p = _Draw_CachePic( 'gfx/box_tm.lmp' );
+		M_DrawTransPic( cx, cy, p );
+		p = _Draw_CachePic( 'gfx/box_mm.lmp' );
+		for ( n = 0; n < lines; n ++ ) {
+
+			cy += 8;
+			if ( n === 1 )
+				p = _Draw_CachePic( 'gfx/box_mm2.lmp' );
+			M_DrawTransPic( cx, cy, p );
+
+		}
+
+		p = _Draw_CachePic( 'gfx/box_bm.lmp' );
+		M_DrawTransPic( cx, cy + 8, p );
+		width -= 2;
+		cx += 16;
+
+	}
+
+	// draw right side
+	cy = y;
+	p = _Draw_CachePic( 'gfx/box_tr.lmp' );
+	M_DrawTransPic( cx, cy, p );
+	p = _Draw_CachePic( 'gfx/box_mr.lmp' );
+	for ( n = 0; n < lines; n ++ ) {
+
+		cy += 8;
+		M_DrawTransPic( cx, cy, p );
+
+	}
+
+	p = _Draw_CachePic( 'gfx/box_br.lmp' );
+	M_DrawTransPic( cx, cy + 8, p );
+
+}
+
+/*
+==============================================================================
+
+			TRANSLATION TABLE (for player color)
+
+==============================================================================
+*/
+
+const TOP_RANGE = 16;
+const BOTTOM_RANGE = 96;
+
+const identityTable = new Uint8Array( 256 );
+const translationTable = new Uint8Array( 256 );
+
+function M_BuildTranslationTable( top, bottom ) {
+
+	for ( let j = 0; j < 256; j ++ )
+		identityTable[ j ] = j;
+
+	translationTable.set( identityTable );
+
+	if ( top < 128 ) {
+
+		for ( let j = 0; j < 16; j ++ )
+			translationTable[ TOP_RANGE + j ] = identityTable[ top + j ];
+
+	} else {
+
+		for ( let j = 0; j < 16; j ++ )
+			translationTable[ TOP_RANGE + j ] = identityTable[ top + 15 - j ];
+
+	}
+
+	if ( bottom < 128 ) {
+
+		for ( let j = 0; j < 16; j ++ )
+			translationTable[ BOTTOM_RANGE + j ] = identityTable[ bottom + j ];
+
+	} else {
+
+		for ( let j = 0; j < 16; j ++ )
+			translationTable[ BOTTOM_RANGE + j ] = identityTable[ bottom + 15 - j ];
+
+	}
+
+}
+
+/*
+================
+M_ToggleMenu_f
+================
+*/
+export function M_ToggleMenu_f() {
+
+	m_entersound = true;
+
+	if ( getKeyDest() === key_menu ) {
+
+		if ( m_state !== m_main ) {
+
+			M_Menu_Main_f();
+			return;
+
+		}
+
+		setKeyDest( key_game );
+		m_state = m_none;
+		return;
+
+	}
+
+	if ( getKeyDest() === key_console ) {
+
+		Con_ToggleConsole_f();
+
+	} else {
+
+		M_Menu_Main_f();
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			MAIN MENU
+
+==============================================================================
+*/
+
+let m_main_cursor = 0;
+const MAIN_ITEMS = 5;
+
+// Check if we're currently playing (not watching demos)
+function M_InGame() {
+
+	// ca_connected = 2 in client.js
+	// Don't show Continue during demo playback - only when actually playing
+	if ( _cls.demoplayback )
+		return false;
+
+	return _sv.active || _cls.state === 2;
+
+}
+
+export function M_Menu_Main_f() {
+
+	if ( getKeyDest() !== key_menu ) {
+
+		m_save_demonum = _cls.demonum;
+		_cls.demonum = - 1;
+
+	}
+
+	setKeyDest( key_menu );
+	m_state = m_main;
+	m_entersound = true;
+
+}
+
+function M_Main_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	const inGame = M_InGame();
+	const itemCount = inGame ? MAIN_ITEMS + 1 : MAIN_ITEMS;
+
+	M_DrawTransPic( 16, 4, _Draw_CachePic( 'gfx/qplaque.lmp' ) );
+	const p = _Draw_CachePic( 'gfx/ttl_main.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	// If in-game, show Continue option first, then the regular menu below it
+	if ( inGame ) {
+
+		M_DrawTransPic( 72, 32, _Draw_CachePic( 'gfx/continue.lmp' ) );
+		M_DrawTransPic( 72, 52, _Draw_CachePic( 'gfx/mainmenu.lmp' ) );
+
+	} else {
+
+		M_DrawTransPic( 72, 32, _Draw_CachePic( 'gfx/mainmenu.lmp' ) );
+
+	}
+
+	const f = Math.floor( _host_time_get() * 10 ) % 6;
+	M_DrawTransPic( 54, 32 + m_main_cursor * 20, _Draw_CachePic( 'gfx/menudot' + ( f + 1 ) + '.lmp' ) );
+
+}
+
+function M_Main_Key( key ) {
+
+	const inGame = M_InGame();
+	const itemCount = inGame ? MAIN_ITEMS + 1 : MAIN_ITEMS;
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			setKeyDest( key_game );
+			m_state = m_none;
+			_cls.demonum = m_save_demonum;
+			if ( _cls.demonum !== - 1 && ! _cls.demoplayback && _cls.state !== 2 ) // ca_connected
+				if ( _CL_NextDemo ) _CL_NextDemo();
+			break;
+
+		case K_DOWNARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( ++ m_main_cursor >= itemCount )
+				m_main_cursor = 0;
+			break;
+
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( -- m_main_cursor < 0 )
+				m_main_cursor = itemCount - 1;
+			break;
+
+		case K_ENTER:
+			m_entersound = true;
+
+			// Adjust cursor for menu action - if in-game, cursor 0 is Continue
+			const actionCursor = inGame ? m_main_cursor - 1 : m_main_cursor;
+
+			if ( inGame && m_main_cursor === 0 ) {
+
+				// Continue - return to game
+				setKeyDest( key_game );
+				m_state = m_none;
+				break;
+
+			}
+
+			switch ( actionCursor ) {
+
+				case 0:
+					M_Menu_SinglePlayer_f();
+					break;
+				case 1:
+					M_Menu_MultiPlayer_f();
+					break;
+				case 2:
+					M_Menu_Options_f();
+					break;
+				case 3:
+					M_Menu_Help_f();
+					break;
+				case 4:
+					M_Menu_Quit_f();
+					break;
+
+			}
+
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			SINGLE PLAYER MENU
+
+==============================================================================
+*/
+
+let m_singleplayer_cursor = 0;
+const SINGLEPLAYER_ITEMS = 3;
+
+function M_Menu_SinglePlayer_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_singleplayer;
+	m_entersound = true;
+
+}
+
+function M_SinglePlayer_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	M_DrawTransPic( 16, 4, _Draw_CachePic( 'gfx/qplaque.lmp' ) );
+	const p = _Draw_CachePic( 'gfx/ttl_sgl.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+	M_DrawTransPic( 72, 32, _Draw_CachePic( 'gfx/sp_menu.lmp' ) );
+
+	const f = Math.floor( _host_time_get() * 10 ) % 6;
+	M_DrawTransPic( 54, 32 + m_singleplayer_cursor * 20, _Draw_CachePic( 'gfx/menudot' + ( f + 1 ) + '.lmp' ) );
+
+}
+
+function M_SinglePlayer_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_Main_f();
+			break;
+
+		case K_DOWNARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( ++ m_singleplayer_cursor >= SINGLEPLAYER_ITEMS )
+				m_singleplayer_cursor = 0;
+			break;
+
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( -- m_singleplayer_cursor < 0 )
+				m_singleplayer_cursor = SINGLEPLAYER_ITEMS - 1;
+			break;
+
+		case K_ENTER:
+			m_entersound = true;
+
+			switch ( m_singleplayer_cursor ) {
+
+				case 0:
+					setKeyDest( key_game );
+					if ( _sv.active )
+						Cbuf_AddText( 'disconnect\n' );
+					Cbuf_AddText( 'maxplayers 1\n' );
+					Cbuf_AddText( 'map start\n' );
+					break;
+				case 1:
+					M_Menu_Load_f();
+					break;
+				case 2:
+					M_Menu_Save_f();
+					break;
+
+			}
+
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			LOAD/SAVE MENU
+
+==============================================================================
+*/
+
+let load_cursor = 0;
+const MAX_SAVEGAMES = 12;
+
+const m_filenames = [];
+const loadable = [];
+for ( let i = 0; i < MAX_SAVEGAMES; i ++ ) {
+
+	m_filenames[ i ] = '--- UNUSED SLOT ---';
+	loadable[ i ] = false;
+
+}
+
+function M_ScanSaves() {
+
+	// In browser, save games would be stored in localStorage or IndexedDB
+	for ( let i = 0; i < MAX_SAVEGAMES; i ++ ) {
+
+		m_filenames[ i ] = '--- UNUSED SLOT ---';
+		loadable[ i ] = false;
+
+	}
+
+}
+
+function M_Menu_Load_f() {
+
+	m_entersound = true;
+	m_state = m_load;
+	setKeyDest( key_menu );
+	M_ScanSaves();
+
+}
+
+function M_Menu_Save_f() {
+
+	if ( ! _sv.active )
+		return;
+	if ( _cl.intermission )
+		return;
+	if ( _svs.maxclients !== 1 )
+		return;
+
+	m_entersound = true;
+	m_state = m_save;
+	setKeyDest( key_menu );
+	M_ScanSaves();
+
+}
+
+function M_Load_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	const p = _Draw_CachePic( 'gfx/p_load.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	for ( let i = 0; i < MAX_SAVEGAMES; i ++ )
+		M_Print( 16, 32 + 8 * i, m_filenames[ i ] );
+
+	// line cursor
+	M_DrawCharacter( 8, 32 + load_cursor * 8, 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
+
+}
+
+function M_Save_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	const p = _Draw_CachePic( 'gfx/p_save.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	for ( let i = 0; i < MAX_SAVEGAMES; i ++ )
+		M_Print( 16, 32 + 8 * i, m_filenames[ i ] );
+
+	M_DrawCharacter( 8, 32 + load_cursor * 8, 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
+
+}
+
+function M_Load_Key( k ) {
+
+	switch ( k ) {
+
+		case K_ESCAPE:
+			M_Menu_SinglePlayer_f();
+			break;
+		case K_ENTER:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu2.wav' );
+			if ( ! loadable[ load_cursor ] )
+				return;
+			m_state = m_none;
+			setKeyDest( key_game );
+			if ( _SCR_BeginLoadingPlaque ) _SCR_BeginLoadingPlaque();
+			Cbuf_AddText( 'load s' + load_cursor + '\n' );
+			return;
+		case K_UPARROW:
+		case K_LEFTARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			load_cursor --;
+			if ( load_cursor < 0 )
+				load_cursor = MAX_SAVEGAMES - 1;
+			break;
+		case K_DOWNARROW:
+		case K_RIGHTARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			load_cursor ++;
+			if ( load_cursor >= MAX_SAVEGAMES )
+				load_cursor = 0;
+			break;
+
+	}
+
+}
+
+function M_Save_Key( k ) {
+
+	switch ( k ) {
+
+		case K_ESCAPE:
+			M_Menu_SinglePlayer_f();
+			break;
+		case K_ENTER:
+			m_state = m_none;
+			setKeyDest( key_game );
+			Cbuf_AddText( 'save s' + load_cursor + '\n' );
+			return;
+		case K_UPARROW:
+		case K_LEFTARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			load_cursor --;
+			if ( load_cursor < 0 )
+				load_cursor = MAX_SAVEGAMES - 1;
+			break;
+		case K_DOWNARROW:
+		case K_RIGHTARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			load_cursor ++;
+			if ( load_cursor >= MAX_SAVEGAMES )
+				load_cursor = 0;
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			MULTIPLAYER MENU
+
+==============================================================================
+*/
+
+let m_multiplayer_cursor = 0;
+const MULTIPLAYER_ITEMS = 3;
+
+function M_Menu_MultiPlayer_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_multiplayer;
+	m_entersound = true;
+
+}
+
+function M_MultiPlayer_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	M_DrawTransPic( 16, 4, _Draw_CachePic( 'gfx/qplaque.lmp' ) );
+	const p = _Draw_CachePic( 'gfx/p_multi.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+	M_DrawTransPic( 72, 32, _Draw_CachePic( 'gfx/mp_menu.lmp' ) );
+
+	const f = Math.floor( _host_time_get() * 10 ) % 6;
+	M_DrawTransPic( 54, 32 + m_multiplayer_cursor * 20, _Draw_CachePic( 'gfx/menudot' + ( f + 1 ) + '.lmp' ) );
+
+}
+
+function M_MultiPlayer_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_Main_f();
+			break;
+		case K_DOWNARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( ++ m_multiplayer_cursor >= MULTIPLAYER_ITEMS )
+				m_multiplayer_cursor = 0;
+			break;
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			if ( -- m_multiplayer_cursor < 0 )
+				m_multiplayer_cursor = MULTIPLAYER_ITEMS - 1;
+			break;
+		case K_ENTER:
+			m_entersound = true;
+			switch ( m_multiplayer_cursor ) {
+
+				case 0:
+				case 1:
+					// Network menus - stub for browser
+					break;
+				case 2:
+					M_Menu_Setup_f();
+					break;
+
+			}
+
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			OPTIONS MENU HELPERS
+
+==============================================================================
+*/
+
+const SLIDER_RANGE = 10;
+
+function M_DrawSlider( x, y, range ) {
+
+	if ( range < 0 )
+		range = 0;
+	if ( range > 1 )
+		range = 1;
+
+	M_DrawCharacter( x - 8, y, 128 );
+	for ( let i = 0; i < SLIDER_RANGE; i ++ )
+		M_DrawCharacter( x + i * 8, y, 129 );
+	M_DrawCharacter( x + SLIDER_RANGE * 8, y, 130 );
+	M_DrawCharacter( x + Math.floor( ( SLIDER_RANGE - 1 ) * 8 * range ), y, 131 );
+
+}
+
+function M_DrawCheckbox( x, y, on ) {
+
+	if ( on )
+		M_Print( x, y, 'on' );
+	else
+		M_Print( x, y, 'off' );
+
+}
+
+function M_AdjustSliders( dir ) {
+
+	if ( _S_LocalSound ) _S_LocalSound( 'misc/menu3.wav' );
+
+	switch ( m_options_cursor ) {
+
+		case 3: // screen size
+			Cvar_SetValue( 'viewsize', scr_viewsize.value + dir * 10 );
+			if ( scr_viewsize.value < 30 )
+				Cvar_SetValue( 'viewsize', 30 );
+			if ( scr_viewsize.value > 120 )
+				Cvar_SetValue( 'viewsize', 120 );
+			break;
+
+		case 4: // gamma
+			Cvar_SetValue( 'gamma', v_gamma.value - dir * 0.05 );
+			if ( v_gamma.value < 0.5 )
+				Cvar_SetValue( 'gamma', 0.5 );
+			if ( v_gamma.value > 1 )
+				Cvar_SetValue( 'gamma', 1 );
+			break;
+
+		case 5: // mouse speed
+			Cvar_SetValue( 'sensitivity', sensitivity.value + dir * 0.5 );
+			if ( sensitivity.value < 1 )
+				Cvar_SetValue( 'sensitivity', 1 );
+			if ( sensitivity.value > 11 )
+				Cvar_SetValue( 'sensitivity', 11 );
+			break;
+
+		case 6: // music volume
+			Cvar_SetValue( 'bgmvolume', bgmvolume.value + dir * 0.1 );
+			if ( bgmvolume.value < 0 )
+				Cvar_SetValue( 'bgmvolume', 0 );
+			if ( bgmvolume.value > 1 )
+				Cvar_SetValue( 'bgmvolume', 1 );
+			break;
+
+		case 7: // sfx volume
+			Cvar_SetValue( 'volume', volume.value + dir * 0.1 );
+			if ( volume.value < 0 )
+				Cvar_SetValue( 'volume', 0 );
+			if ( volume.value > 1 )
+				Cvar_SetValue( 'volume', 1 );
+			break;
+
+		case 8: // always run
+			if ( cl_forwardspeed.value > 200 ) {
+
+				Cvar_SetValue( 'cl_forwardspeed', 200 );
+				Cvar_SetValue( 'cl_backspeed', 200 );
+
+			} else {
+
+				Cvar_SetValue( 'cl_forwardspeed', 400 );
+				Cvar_SetValue( 'cl_backspeed', 400 );
+
+			}
+
+			break;
+
+		case 9: // invert mouse
+			Cvar_SetValue( 'm_pitch', - m_pitch.value );
+			break;
+
+		case 10: // lookspring
+			Cvar_SetValue( 'lookspring', ! lookspring.value ? 1 : 0 );
+			break;
+
+		case 11: // lookstrafe
+			Cvar_SetValue( 'lookstrafe', ! lookstrafe.value ? 1 : 0 );
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			OPTIONS MENU
+
+==============================================================================
+*/
+
+const OPTIONS_ITEMS = 13;
+let m_options_cursor = 0;
+
+function M_Menu_Options_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_options;
+	m_entersound = true;
+
+}
+
+function M_Options_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	M_DrawTransPic( 16, 4, _Draw_CachePic( 'gfx/qplaque.lmp' ) );
+	const p = _Draw_CachePic( 'gfx/p_option.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	M_Print( 16, 32, '    Customize controls' );
+	M_Print( 16, 40, '         Go to console' );
+	M_Print( 16, 48, '     Reset to defaults' );
+
+	M_Print( 16, 56, '           Screen size' );
+	let r = ( scr_viewsize.value - 30 ) / ( 120 - 30 );
+	M_DrawSlider( 220, 56, r );
+
+	M_Print( 16, 64, '            Brightness' );
+	r = ( 1.0 - v_gamma.value ) / 0.5;
+	M_DrawSlider( 220, 64, r );
+
+	M_Print( 16, 72, '           Mouse Speed' );
+	r = ( sensitivity.value - 1 ) / 10;
+	M_DrawSlider( 220, 72, r );
+
+	M_Print( 16, 80, '       CD Music Volume' );
+	r = bgmvolume.value;
+	M_DrawSlider( 220, 80, r );
+
+	M_Print( 16, 88, '          Sound Volume' );
+	r = volume.value;
+	M_DrawSlider( 220, 88, r );
+
+	M_Print( 16, 96, '            Always Run' );
+	M_DrawCheckbox( 220, 96, cl_forwardspeed.value > 200 );
+
+	M_Print( 16, 104, '          Invert Mouse' );
+	M_DrawCheckbox( 220, 104, m_pitch.value < 0 );
+
+	M_Print( 16, 112, '            Lookspring' );
+	M_DrawCheckbox( 220, 112, lookspring.value );
+
+	M_Print( 16, 120, '            Lookstrafe' );
+	M_DrawCheckbox( 220, 120, lookstrafe.value );
+
+	M_Print( 16, 128, '    Use old status bar' );
+
+	// cursor
+	M_DrawCharacter( 200, 32 + m_options_cursor * 8, 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
+
+}
+
+function M_Options_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_Main_f();
+			break;
+		case K_ENTER:
+			m_entersound = true;
+			switch ( m_options_cursor ) {
+
+				case 0:
+					M_Menu_Keys_f();
+					break;
+				case 1:
+					m_state = m_none;
+					setKeyDest( key_console );
+					Con_ToggleConsole_f();
+					break;
+				case 2:
+					Cbuf_AddText( 'exec default.cfg\n' );
+					break;
+				default:
+					M_AdjustSliders( 1 );
+					break;
+
+			}
+
+			break;
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			m_options_cursor --;
+			if ( m_options_cursor < 0 )
+				m_options_cursor = OPTIONS_ITEMS - 1;
+			break;
+		case K_DOWNARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			m_options_cursor ++;
+			if ( m_options_cursor >= OPTIONS_ITEMS )
+				m_options_cursor = 0;
+			break;
+		case K_LEFTARROW:
+			M_AdjustSliders( - 1 );
+			break;
+		case K_RIGHTARROW:
+			M_AdjustSliders( 1 );
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			KEYS MENU (key binding)
+
+==============================================================================
+*/
+
+let m_keys_cursor = 0;
+let bind_grab = false;
+
+const bindnames = [
+	[ '+attack', 'attack' ],
+	[ 'impulse 10', 'change weapon' ],
+	[ '+jump', 'jump / swim up' ],
+	[ '+forward', 'walk forward' ],
+	[ '+back', 'backpedal' ],
+	[ '+left', 'turn left' ],
+	[ '+right', 'turn right' ],
+	[ '+speed', 'run' ],
+	[ '+moveleft', 'step left' ],
+	[ '+moveright', 'step right' ],
+	[ '+strafe', 'sidestep' ],
+	[ '+lookup', 'look up' ],
+	[ '+lookdown', 'look down' ],
+	[ 'centerview', 'center view' ],
+	[ '+mlook', 'mouse look' ],
+	[ '+klook', 'keyboard look' ],
+	[ '+moveup', 'swim up' ],
+	[ '+movedown', 'swim down' ],
+];
+
+const NUMCOMMANDS = bindnames.length;
+
+function M_Menu_Keys_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_keys;
+	m_entersound = true;
+
+}
+
+function M_Keys_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	const p = _Draw_CachePic( 'gfx/ttl_cstm.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	if ( bind_grab )
+		M_Print( 12, 32, 'Press a key or button for this action' );
+	else
+		M_Print( 18, 32, 'Enter to change, backspace to clear' );
+
+	for ( let i = 0; i < NUMCOMMANDS; i ++ ) {
+
+		const y = 48 + 8 * i;
+		M_Print( 16, y, bindnames[ i ][ 1 ] );
+
+	}
+
+	// cursor
+	if ( bind_grab ) {
+
+		M_DrawCharacter( 140, 48 + m_keys_cursor * 8, 61 ); // '='
+
+	} else {
+
+		M_DrawCharacter( 140, 48 + m_keys_cursor * 8, 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
+
+	}
+
+}
+
+function M_Keys_Key( key ) {
+
+	if ( bind_grab ) {
+
+		// Grabbed a key
+		if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+		if ( key === K_ESCAPE ) {
+
+			bind_grab = false;
+
+		} else {
+
+			// Set the binding via Cbuf
+			Cbuf_AddText( 'bind "' + key + '" "' + bindnames[ m_keys_cursor ][ 0 ] + '"\n' );
+
+		}
+
+		bind_grab = false;
+		return;
+
+	}
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_Options_f();
+			break;
+		case K_LEFTARROW:
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			m_keys_cursor --;
+			if ( m_keys_cursor < 0 )
+				m_keys_cursor = NUMCOMMANDS - 1;
+			break;
+		case K_DOWNARROW:
+		case K_RIGHTARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			m_keys_cursor ++;
+			if ( m_keys_cursor >= NUMCOMMANDS )
+				m_keys_cursor = 0;
+			break;
+		case K_ENTER:
+			bind_grab = true;
+			break;
+		case K_BACKSPACE:
+		case K_DEL:
+			Cbuf_AddText( 'unbind "' + bindnames[ m_keys_cursor ][ 0 ] + '"\n' );
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			SETUP MENU
+
+==============================================================================
+*/
+
+let setup_cursor = 4;
+const setup_cursor_table = [ 40, 56, 80, 104, 140 ];
+let setup_hostname = 'hostname';
+let setup_myname = 'player';
+let setup_top = 0;
+let setup_bottom = 0;
+const NUM_SETUP_CMDS = 5;
+
+function M_Menu_Setup_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_setup;
+	m_entersound = true;
+
+}
+
+function M_Setup_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+
+	M_DrawTransPic( 16, 4, _Draw_CachePic( 'gfx/qplaque.lmp' ) );
+	const p = _Draw_CachePic( 'gfx/p_multi.lmp' );
+	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
+
+	M_Print( 64, 40, 'Hostname' );
+	M_DrawTextBox( 160, 32, 16, 1 );
+	M_Print( 168, 40, setup_hostname );
+
+	M_Print( 64, 56, 'Your name' );
+	M_DrawTextBox( 160, 48, 16, 1 );
+	M_Print( 168, 56, setup_myname );
+
+	M_Print( 64, 80, 'Shirt color' );
+	M_Print( 64, 104, 'Pants color' );
+
+	M_DrawTextBox( 64, 132, 14, 1 );
+	M_Print( 72, 140, 'Accept Changes' );
+
+	M_DrawCharacter( 56, setup_cursor_table[ setup_cursor ], 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
+
+}
+
+function M_Setup_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_MultiPlayer_f();
+			break;
+		case K_UPARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			setup_cursor --;
+			if ( setup_cursor < 0 )
+				setup_cursor = NUM_SETUP_CMDS - 1;
+			break;
+		case K_DOWNARROW:
+			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu1.wav' );
+			setup_cursor ++;
+			if ( setup_cursor >= NUM_SETUP_CMDS )
+				setup_cursor = 0;
+			break;
+		case K_ENTER:
+			if ( setup_cursor === 4 ) {
+
+				Cbuf_AddText( 'name "' + setup_myname + '"\n' );
+				Cbuf_AddText( 'hostname "' + setup_hostname + '"\n' );
+				M_Menu_MultiPlayer_f();
+
+			}
+
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			HELP MENU
+
+==============================================================================
+*/
+
+let m_help_page = 0;
+const NUM_HELP_PAGES = 6;
+
+function M_Menu_Help_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_help;
+	m_entersound = true;
+	m_help_page = 0;
+
+}
+
+function M_Help_Draw() {
+
+	if ( ! _Draw_CachePic ) return;
+	M_DrawPic( 0, 0, _Draw_CachePic( 'gfx/help' + m_help_page + '.lmp' ) );
+
+}
+
+function M_Help_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+			M_Menu_Main_f();
+			break;
+		case K_UPARROW:
+		case K_RIGHTARROW:
+			m_entersound = true;
+			if ( ++ m_help_page >= NUM_HELP_PAGES )
+				m_help_page = 0;
+			break;
+		case K_DOWNARROW:
+		case K_LEFTARROW:
+			m_entersound = true;
+			if ( -- m_help_page < 0 )
+				m_help_page = NUM_HELP_PAGES - 1;
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			QUIT MENU
+
+==============================================================================
+*/
+
+function M_Menu_Quit_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_quit;
+	m_entersound = true;
+
+}
+
+function M_Quit_Draw() {
+
+	M_DrawTextBox( 0, 0, 38, 23 );
+	M_PrintWhite( 16, 12, '  Quake version 1.09 by id Software\n' );
+	M_PrintWhite( 16, 28, 'Programming        Art \n' );
+	M_Print( 16, 36, ' John Carmack       Adrian Carmack\n' );
+	M_Print( 16, 44, ' Michael Abrash     Kevin Cloud\n' );
+	M_Print( 16, 52, ' John Cash          Paul Steed\n' );
+	M_Print( 16, 60, ' Dave \'Zoid\' Kirsch\n' );
+	M_PrintWhite( 16, 76, 'Design             Biz\n' );
+	M_Print( 16, 84, ' John Romero        Jay Wilbur\n' );
+	M_Print( 16, 92, ' Sandy Petersen     Mike Wilson\n' );
+	M_Print( 16, 100, ' American McGee     Donna Jackson\n' );
+	M_Print( 16, 108, ' Tim Willits        Todd Hollenshead\n' );
+	M_PrintWhite( 16, 124, 'Support            Id Mom\n' );
+	M_Print( 16, 132, ' Barrett Alexander  Shawn Green\n' );
+	M_PrintWhite( 16, 148, 'Press y to quit\n' );
+
+}
+
+function M_Quit_Key( key ) {
+
+	switch ( key ) {
+
+		case K_ESCAPE:
+		case 110: // 'n'
+		case 78: // 'N'
+			M_Menu_Main_f();
+			break;
+
+		case 121: // 'y'
+		case 89: // 'Y'
+			// Navigate to the project page
+			window.open( 'https://x.com/mrdoob/status/2015076521531355583', '_blank' );
+			M_Menu_Main_f();
+			break;
+
+	}
+
+}
+
+/*
+==============================================================================
+
+			VIDEO MENU (stub)
+
+==============================================================================
+*/
+
+function M_Menu_Video_f() {
+
+	setKeyDest( key_menu );
+	m_state = m_video;
+	m_entersound = true;
+
+}
+
+function M_Video_Draw() {
+
+	M_Print( 16, 32, 'Video settings not available in browser' );
+
+}
+
+function M_Video_Key( key ) {
+
+	if ( key === K_ESCAPE )
+		M_Menu_Options_f();
+
+}
+
+/*
+==============================================================================
+
+			PUBLIC API
+
+==============================================================================
+*/
+
+/*
+================
+M_Init
+================
+*/
+export function M_Init() {
+
+	Cmd_AddCommand( 'togglemenu', M_ToggleMenu_f );
+	Cmd_AddCommand( 'menu_main', M_Menu_Main_f );
+	Cmd_AddCommand( 'menu_singleplayer', M_Menu_SinglePlayer_f );
+	Cmd_AddCommand( 'menu_load', M_Menu_Load_f );
+	Cmd_AddCommand( 'menu_save', M_Menu_Save_f );
+	Cmd_AddCommand( 'menu_multiplayer', M_Menu_MultiPlayer_f );
+	Cmd_AddCommand( 'menu_setup', M_Menu_Setup_f );
+	Cmd_AddCommand( 'menu_options', M_Menu_Options_f );
+	Cmd_AddCommand( 'menu_keys', M_Menu_Keys_f );
+	Cmd_AddCommand( 'menu_video', M_Menu_Video_f );
+	Cmd_AddCommand( 'help', M_Menu_Help_f );
+	Cmd_AddCommand( 'menu_quit', M_Menu_Quit_f );
+
+}
+
+/*
+================
+M_Keydown
+================
+*/
+export function M_Keydown( key ) {
+
+	switch ( m_state ) {
+
+		case m_none: return;
+		case m_main: M_Main_Key( key ); return;
+		case m_singleplayer: M_SinglePlayer_Key( key ); return;
+		case m_load: M_Load_Key( key ); return;
+		case m_save: M_Save_Key( key ); return;
+		case m_multiplayer: M_MultiPlayer_Key( key ); return;
+		case m_setup: M_Setup_Key( key ); return;
+		case m_options: M_Options_Key( key ); return;
+		case m_keys: M_Keys_Key( key ); return;
+		case m_video: M_Video_Key( key ); return;
+		case m_help: M_Help_Key( key ); return;
+		case m_quit: M_Quit_Key( key ); return;
+		// net, serial, modem, lan, gameoptions, search, slist - stubs for browser
+		default: return;
+
+	}
+
+}
+
+/*
+================
+M_Draw
+================
+*/
+export function M_Draw() {
+
+	if ( m_state === m_none || getKeyDest() !== key_menu )
+		return;
+
+	if ( m_recursiveDraw ) {
+
+		// draw previous menu as background if overlapping
+		if ( _Draw_FadeScreen ) _Draw_FadeScreen();
+		m_recursiveDraw = false;
+
+	}
+
+	switch ( m_state ) {
+
+		case m_main: M_Main_Draw(); break;
+		case m_singleplayer: M_SinglePlayer_Draw(); break;
+		case m_load: M_Load_Draw(); break;
+		case m_save: M_Save_Draw(); break;
+		case m_multiplayer: M_MultiPlayer_Draw(); break;
+		case m_setup: M_Setup_Draw(); break;
+		case m_options: M_Options_Draw(); break;
+		case m_keys: M_Keys_Draw(); break;
+		case m_video: M_Video_Draw(); break;
+		case m_help: M_Help_Draw(); break;
+		case m_quit: M_Quit_Draw(); break;
+
+	}
+
+	if ( m_entersound ) {
+
+		if ( _S_LocalSound ) _S_LocalSound( 'misc/menu2.wav' );
+		m_entersound = false;
+
+	}
+
+}
+
+/*
+================
+M_TouchInput
+
+Handle touch input for menu selection.
+Converts screen coordinates to virtual 320x200 space and selects menu items.
+================
+*/
+export function M_TouchInput( touchX, touchY, screenWidth, screenHeight ) {
+
+	// If no menu is shown (e.g. during demo playback), show the menu
+	if ( m_state === m_none ) {
+
+		M_ToggleMenu_f();
+		return;
+
+	}
+
+	// Convert screen/element coordinates to _vid space (menu drawing coordinates)
+	// screenWidth/Height are the CSS dimensions of the element clicked on
+	// _vid is the logical rendering size the menu uses
+
+	// Map click position proportionally from element space to _vid space
+	const vidX = ( touchX / screenWidth ) * _vid.width;
+	const vidY = ( touchY / screenHeight ) * _vid.height;
+
+	// Menu is drawn centered horizontally: drawing X = menuX + (_vid.width - 320) / 2
+	// So to convert click to menu space: menuX = vidX - (_vid.width - 320) / 2
+	const offsetX = ( _vid.width - 320 ) / 2;
+	const vx = vidX - offsetX;
+	const vy = vidY;
+
+
+	// Handle based on current menu state
+	switch ( m_state ) {
+
+		case m_main:
+			M_Main_Touch( vx, vy );
+			break;
+
+		case m_singleplayer:
+			M_SinglePlayer_Touch( vx, vy );
+			break;
+
+		case m_load:
+		case m_save:
+			M_LoadSave_Touch( vx, vy );
+			break;
+
+		case m_multiplayer:
+			M_MultiPlayer_Touch( vx, vy );
+			break;
+
+		case m_options:
+			M_Options_Touch( vx, vy );
+			break;
+
+		case m_keys:
+			M_Keys_Touch( vx, vy );
+			break;
+
+		case m_help:
+			M_Help_Touch( vx, vy );
+			break;
+
+		case m_quit:
+			M_Quit_Touch( vx, vy );
+			break;
+
+	}
+
+}
+
+// Main menu touch - items at y=32, 20px spacing
+function M_Main_Touch( vx, vy ) {
+
+	const inGame = M_InGame();
+	const itemCount = inGame ? MAIN_ITEMS + 1 : MAIN_ITEMS;
+
+	// Menu items start at y=32, each item is ~20px tall
+	if ( vy >= 32 && vy < 32 + itemCount * 20 ) {
+
+		const item = Math.floor( ( vy - 32 ) / 20 );
+		if ( item >= 0 && item < itemCount ) {
+
+			m_main_cursor = item;
+			M_Main_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Single player menu touch
+function M_SinglePlayer_Touch( vx, vy ) {
+
+	if ( vy >= 32 && vy < 32 + SINGLEPLAYER_ITEMS * 20 ) {
+
+		const item = Math.floor( ( vy - 32 ) / 20 );
+		if ( item >= 0 && item < SINGLEPLAYER_ITEMS ) {
+
+			m_singleplayer_cursor = item;
+			M_SinglePlayer_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Load/Save menu touch - items at y=32, 8px spacing
+function M_LoadSave_Touch( vx, vy ) {
+
+	if ( vy >= 32 && vy < 32 + MAX_SAVEGAMES * 8 ) {
+
+		const item = Math.floor( ( vy - 32 ) / 8 );
+		if ( item >= 0 && item < MAX_SAVEGAMES ) {
+
+			load_cursor = item;
+			if ( m_state === m_load )
+				M_Load_Key( K_ENTER );
+			else
+				M_Save_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Multiplayer menu touch
+function M_MultiPlayer_Touch( vx, vy ) {
+
+	if ( vy >= 32 && vy < 32 + MULTIPLAYER_ITEMS * 20 ) {
+
+		const item = Math.floor( ( vy - 32 ) / 20 );
+		if ( item >= 0 && item < MULTIPLAYER_ITEMS ) {
+
+			m_multiplayer_cursor = item;
+			M_MultiPlayer_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Options menu touch - items at y=32, 8px spacing
+function M_Options_Touch( vx, vy ) {
+
+	if ( vy >= 32 && vy < 32 + OPTIONS_ITEMS * 8 ) {
+
+		const item = Math.floor( ( vy - 32 ) / 8 );
+		if ( item >= 0 && item < OPTIONS_ITEMS ) {
+
+			m_options_cursor = item;
+			M_Options_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Keys menu touch - items at y=48, 8px spacing
+function M_Keys_Touch( vx, vy ) {
+
+	if ( vy >= 48 && vy < 48 + NUMCOMMANDS * 8 ) {
+
+		const item = Math.floor( ( vy - 48 ) / 8 );
+		if ( item >= 0 && item < NUMCOMMANDS ) {
+
+			m_keys_cursor = item;
+			M_Keys_Key( K_ENTER );
+
+		}
+
+	}
+
+}
+
+// Help menu touch - tap anywhere to go to next page
+function M_Help_Touch( vx, vy ) {
+
+	M_Help_Key( K_ENTER );
+
+}
+
+// Quit menu touch - tap top half for yes, bottom half for no
+function M_Quit_Touch( vx, vy ) {
+
+	if ( vy < 100 ) {
+
+		M_Quit_Key( 121 ); // 'y'
+
+	} else {
+
+		M_Quit_Key( 110 ); // 'n'
+
+	}
+
+}

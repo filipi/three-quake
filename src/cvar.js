@@ -1,0 +1,237 @@
+// Ported from: WinQuake/cvar.c -- dynamic variable tracking
+
+/*
+
+cvar_t variables are used to hold scalar or string variables that can be
+changed or displayed at the console or prog code as well as accessed directly
+in C code.
+
+it is sufficient to initialize a cvar_t with just the first two fields, or
+you can add a ,true flag for variables that you want saved to the configuration
+file when the game is quit:
+
+Cvars must be registered before use, or they will have a 0 value instead of
+the float interpretation of the string. Generally, all cvar_t declarations
+should be registered in the appropriate init function before any console
+commands are executed:
+Cvar_RegisterVariable(host_framerate);
+
+*/
+
+import { Con_Printf } from './common.js';
+import { Cmd_Exists, Cmd_Argc, Cmd_Argv } from './cmd.js';
+
+export class cvar_t {
+
+	constructor( name, string, archive, server ) {
+
+		this.name = name;
+		this.string = string || '';
+		this.archive = archive || false; // set to true to cause it to be saved to vars.rc
+		this.server = server || false; // notifies players when changed
+		this.value = parseFloat( this.string ) || 0;
+		this.next = null;
+
+	}
+
+}
+
+let cvar_vars = null;
+
+/*
+============
+Cvar_FindVar
+============
+*/
+export function Cvar_FindVar( var_name ) {
+
+	let _var = cvar_vars;
+	while ( _var ) {
+
+		if ( _var.name === var_name )
+			return _var;
+		_var = _var.next;
+
+	}
+
+	return null;
+
+}
+
+/*
+============
+Cvar_VariableValue
+============
+*/
+export function Cvar_VariableValue( var_name ) {
+
+	const _var = Cvar_FindVar( var_name );
+	if ( ! _var )
+		return 0;
+	return parseFloat( _var.string ) || 0;
+
+}
+
+/*
+============
+Cvar_VariableString
+============
+*/
+export function Cvar_VariableString( var_name ) {
+
+	const _var = Cvar_FindVar( var_name );
+	if ( ! _var )
+		return '';
+	return _var.string;
+
+}
+
+/*
+============
+Cvar_CompleteVariable
+============
+*/
+export function Cvar_CompleteVariable( partial ) {
+
+	const len = partial.length;
+
+	if ( ! len )
+		return null;
+
+	// check functions
+	let _var = cvar_vars;
+	while ( _var ) {
+
+		if ( _var.name.substring( 0, len ) === partial )
+			return _var.name;
+		_var = _var.next;
+
+	}
+
+	return null;
+
+}
+
+/*
+============
+Cvar_Set
+============
+*/
+export function Cvar_Set( var_name, value ) {
+
+	const _var = Cvar_FindVar( var_name );
+	if ( ! _var ) {
+
+		// there is an error in C code if this happens
+		Con_Printf( 'Cvar_Set: variable ' + var_name + ' not found\n' );
+		return;
+
+	}
+
+	const changed = ( _var.string !== value );
+
+	_var.string = value;
+	_var.value = parseFloat( _var.string ) || 0;
+
+	if ( _var.server && changed ) {
+
+		// TODO: if (sv.active) SV_BroadcastPrintf(...)
+
+	}
+
+}
+
+/*
+============
+Cvar_SetValue
+============
+*/
+export function Cvar_SetValue( var_name, value ) {
+
+	Cvar_Set( var_name, String( value ) );
+
+}
+
+/*
+============
+Cvar_RegisterVariable
+
+Adds a freestanding variable to the variable list.
+============
+*/
+export function Cvar_RegisterVariable( variable ) {
+
+	// first check to see if it has already been defined
+	if ( Cvar_FindVar( variable.name ) ) {
+
+		Con_Printf( 'Can\'t register variable ' + variable.name + ', already defined\n' );
+		return;
+
+	}
+
+	// check for overlap with a command
+	if ( Cmd_Exists( variable.name ) ) {
+
+		Con_Printf( 'Cvar_RegisterVariable: ' + variable.name + ' is a command\n' );
+		return;
+
+	}
+
+	// parse the value
+	variable.value = parseFloat( variable.string ) || 0;
+
+	// link the variable in
+	variable.next = cvar_vars;
+	cvar_vars = variable;
+
+}
+
+/*
+============
+Cvar_Command
+
+Handles variable inspection and changing from the console
+============
+*/
+export function Cvar_Command() {
+
+	const v = Cvar_FindVar( Cmd_Argv( 0 ) );
+	if ( ! v )
+		return false;
+
+	// perform a variable print or set
+	if ( Cmd_Argc() === 1 ) {
+
+		Con_Printf( '"' + v.name + '" is "' + v.string + '"\n' );
+		return true;
+
+	}
+
+	Cvar_Set( v.name, Cmd_Argv( 1 ) );
+	return true;
+
+}
+
+/*
+============
+Cvar_WriteVariables
+
+Writes lines containing "set variable value" for all variables
+with the archive flag set to true.
+============
+*/
+export function Cvar_WriteVariables() {
+
+	const lines = [];
+	let _var = cvar_vars;
+	while ( _var ) {
+
+		if ( _var.archive )
+			lines.push( _var.name + ' "' + _var.string + '"\n' );
+		_var = _var.next;
+
+	}
+
+	return lines.join( '' );
+
+}

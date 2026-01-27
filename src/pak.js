@@ -1,0 +1,246 @@
+// PAK file loader -- new module for browser-based asset loading
+// Quake stores all game data in pak0.pak (and optionally pak1.pak)
+// PAK format: 4-byte magic "PACK", 4-byte directory offset, 4-byte directory length
+// Directory entries: 56-byte filename + 4-byte offset + 4-byte length
+
+import { Sys_Printf, Sys_Error } from './sys.js';
+import { Con_Printf } from './common.js';
+
+const MAX_FILES_IN_PACK = 2048;
+
+class packfile_t {
+
+	constructor() {
+
+		this.name = '';
+		this.filepos = 0;
+		this.filelen = 0;
+
+	}
+
+}
+
+class pack_t {
+
+	constructor() {
+
+		this.filename = '';
+		this.files = []; // array of packfile_t
+		this.data = null; // ArrayBuffer of the entire pak
+
+	}
+
+}
+
+// Search paths
+let com_searchpaths = []; // array of { pack, path }
+
+// Loaded packs
+const loadedPacks = [];
+
+// Virtual files (for loose files not in pak)
+const virtualFiles = new Map();
+
+/*
+=================
+COM_LoadPackFile
+
+Takes an ArrayBuffer of the .pak file contents
+Returns a pack_t or null
+=================
+*/
+export function COM_LoadPackFile( filename, buffer ) {
+
+	const view = new DataView( buffer );
+
+	// Check header
+	const id0 = view.getUint8( 0 );
+	const id1 = view.getUint8( 1 );
+	const id2 = view.getUint8( 2 );
+	const id3 = view.getUint8( 3 );
+
+	if ( id0 !== 0x50 || id1 !== 0x41 || id2 !== 0x43 || id3 !== 0x4B ) { // 'PACK'
+
+		Sys_Error( filename + ' is not a packfile' );
+		return null;
+
+	}
+
+	const dirofs = view.getInt32( 4, true );
+	const dirlen = view.getInt32( 8, true );
+
+	const numpackfiles = Math.floor( dirlen / 64 ); // each dir entry is 64 bytes
+
+	if ( numpackfiles > MAX_FILES_IN_PACK )
+		Sys_Error( filename + ' has too many files (' + numpackfiles + ')' );
+
+	const pack = new pack_t();
+	pack.filename = filename;
+	pack.data = buffer;
+
+	const bytes = new Uint8Array( buffer );
+
+	for ( let i = 0; i < numpackfiles; i ++ ) {
+
+		const entryOffset = dirofs + i * 64;
+		const file = new packfile_t();
+
+		// Read filename (56 bytes, null terminated)
+		let name = '';
+		for ( let j = 0; j < 56; j ++ ) {
+
+			const c = bytes[ entryOffset + j ];
+			if ( c === 0 ) break;
+			name += String.fromCharCode( c );
+
+		}
+
+		file.name = name.toLowerCase();
+		file.filepos = view.getInt32( entryOffset + 56, true );
+		file.filelen = view.getInt32( entryOffset + 60, true );
+
+		pack.files.push( file );
+
+	}
+
+	Con_Printf( 'Added packfile ' + filename + ' (' + numpackfiles + ' files)\\n' );
+
+	loadedPacks.push( pack );
+
+	return pack;
+
+}
+
+/*
+=================
+COM_AddGameDirectory
+
+Sets up the search path for a game directory
+=================
+*/
+export function COM_AddGameDirectory( dir ) {
+
+	com_searchpaths.push( { pack: null, path: dir } );
+
+}
+
+/*
+=================
+COM_AddPack
+
+Adds a loaded pack to the search path
+=================
+*/
+export function COM_AddPack( pack ) {
+
+	com_searchpaths.unshift( { pack: pack, path: null } );
+
+}
+
+/*
+=================
+COM_FindFile
+
+Searches through the path looking for a file.
+Returns { data: Uint8Array, size: number } or null
+=================
+*/
+export function COM_FindFile( filename ) {
+
+	const search = filename.toLowerCase();
+
+	// Search through loaded packs (reverse order - last added has priority)
+	for ( let i = 0; i < com_searchpaths.length; i ++ ) {
+
+		const sp = com_searchpaths[ i ];
+		if ( ! sp.pack ) continue;
+
+		const pack = sp.pack;
+		for ( let j = 0; j < pack.files.length; j ++ ) {
+
+			if ( pack.files[ j ].name === search ) {
+
+				const file = pack.files[ j ];
+				const data = new Uint8Array( pack.data, file.filepos, file.filelen );
+				return { data: data, size: file.filelen };
+
+			}
+
+		}
+
+	}
+
+	return null;
+
+}
+
+/*
+=================
+COM_LoadFile
+
+Loads a file from the pack system.
+Returns an ArrayBuffer of the file contents, or null if not found.
+=================
+*/
+export function COM_LoadFile( filename ) {
+
+	const result = COM_FindFile( filename );
+	if ( ! result ) return null;
+
+	// Return a copy of the data as an ArrayBuffer
+	const buf = new ArrayBuffer( result.size );
+	const dest = new Uint8Array( buf );
+	dest.set( result.data );
+	return buf;
+
+}
+
+/*
+=================
+COM_LoadFileAsString
+
+Convenience: load a file and return it as a string
+=================
+*/
+export function COM_LoadFileAsString( filename ) {
+
+	const result = COM_FindFile( filename );
+	if ( ! result ) return null;
+
+	let str = '';
+	for ( let i = 0; i < result.size; i ++ ) {
+
+		str += String.fromCharCode( result.data[ i ] );
+
+	}
+
+	return str;
+
+}
+
+/*
+=================
+COM_FetchPak
+
+Fetches a .pak file from a URL using fetch(), returns a Promise<pack_t>
+This is new for the browser version.
+=================
+*/
+export async function COM_FetchPak( url, filename ) {
+
+	Sys_Printf( 'Fetching ' + url + '...\\n' );
+
+	const response = await fetch( url );
+	if ( ! response.ok ) {
+
+		Con_Printf( 'Failed to fetch ' + url + ': ' + response.statusText + '\\n' );
+		return null;
+
+	}
+
+	const buffer = await response.arrayBuffer();
+	Sys_Printf( 'Loaded ' + url + ' (' + buffer.byteLength + ' bytes)\\n' );
+
+	return COM_LoadPackFile( filename || url, buffer );
+
+}

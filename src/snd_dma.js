@@ -1,0 +1,1088 @@
+// Ported from: WinQuake/snd_dma.c -- main sound system using Web Audio API
+
+import { Cvar_RegisterVariable } from './cvar.js';
+import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from './cmd.js';
+import { Con_Printf, Con_DPrintf } from './console.js';
+import { COM_FindFile } from './pak.js';
+import {
+	sfx_t, sfxcache_t, channel_t, dma_t,
+	channels, MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, NUM_AMBIENTS,
+	total_channels, paintedtime, sn, shm,
+	listener_origin, listener_forward, listener_right, listener_up,
+	sound_nominal_clip_dist,
+	loadas8bit, bgmvolume, volume,
+	snd_initialized, snd_blocked,
+	Sound_SetTotalChannels, Sound_SetPaintedtime, Sound_SetShm, Sound_SetInitialized
+} from './sound.js';
+import { S_LoadSound } from './snd_mem.js';
+
+/*
+==============================================================================
+
+			WEB AUDIO STATE
+
+==============================================================================
+*/
+
+let audioContext = null;
+let masterGain = null;
+
+// Known sounds cache
+const known_sfx = [];
+let num_sfx = 0;
+const MAX_SFX = 512;
+
+for ( let i = 0; i < MAX_SFX; i ++ )
+	known_sfx[ i ] = new sfx_t();
+
+// Ambient sounds
+let ambient_sfx = new Array( NUM_AMBIENTS ).fill( null );
+let sound_started = false;
+
+// nosound cvar
+const nosound = { name: 'nosound', string: '0', value: 0 };
+const precache = { name: 'precache', string: '1', value: 1 };
+const ambient_level = { name: 'ambient_level', string: '0.3', value: 0.3 };
+const ambient_fade = { name: 'ambient_fade', string: '100', value: 100 };
+const snd_noextraupdate = { name: 'snd_noextraupdate', string: '0', value: 0 };
+const snd_show = { name: 'snd_show', string: '0', value: 0 };
+
+/*
+================
+S_Init
+================
+*/
+export function S_Init() {
+
+	Con_Printf( '\nSound Initialization\n' );
+
+	Cvar_RegisterVariable( nosound );
+	Cvar_RegisterVariable( volume );
+	Cvar_RegisterVariable( precache );
+	Cvar_RegisterVariable( loadas8bit );
+	Cvar_RegisterVariable( bgmvolume );
+	Cvar_RegisterVariable( ambient_level );
+	Cvar_RegisterVariable( ambient_fade );
+	Cvar_RegisterVariable( snd_noextraupdate );
+	Cvar_RegisterVariable( snd_show );
+
+	Cmd_AddCommand( 'play', S_Play );
+	Cmd_AddCommand( 'playvol', S_PlayVol );
+	Cmd_AddCommand( 'stopsound', S_StopAllSoundsC );
+	Cmd_AddCommand( 'soundlist', S_SoundList );
+	Cmd_AddCommand( 'soundinfo', S_SoundInfo_f );
+
+	if ( nosound.value ) {
+
+		Con_Printf( 'Sound disabled via nosound cvar\n' );
+		return;
+
+	}
+
+	// Initialize Web Audio API
+	try {
+
+		audioContext = new ( window.AudioContext || window.webkitAudioContext )();
+		masterGain = audioContext.createGain();
+		masterGain.connect( audioContext.destination );
+		masterGain.gain.value = volume.value;
+
+		sound_started = true;
+		Sound_SetInitialized( true );
+
+		Con_Printf( 'Web Audio API initialized (%d Hz)\n', audioContext.sampleRate );
+
+	} catch ( e ) {
+
+		Con_Printf( 'Failed to initialize Web Audio API: %s\n', e.message );
+		return;
+
+	}
+
+	// Set up DMA-equivalent state
+	sn.speed = audioContext ? audioContext.sampleRate : 22050;
+	sn.samplebits = 16;
+	sn.channels = 2;
+	sn.samples = 16384;
+	sn.samplepos = 0;
+	sn.soundalive = true;
+	sn.gamealive = true;
+	sn.submission_chunk = 1;
+	sn.buffer = new Uint8Array( sn.samples * ( sn.samplebits / 8 ) );
+	Sound_SetShm( sn );
+
+	Sound_SetTotalChannels( MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS );
+
+	Con_Printf( 'Sound sampling rate: %d\n', sn.speed );
+
+}
+
+/*
+================
+S_Shutdown
+================
+*/
+export function S_Shutdown() {
+
+	if ( ! sound_started )
+		return;
+
+	sound_started = false;
+	Sound_SetInitialized( false );
+
+	if ( audioContext ) {
+
+		audioContext.close();
+		audioContext = null;
+
+	}
+
+	masterGain = null;
+	num_sfx = 0;
+
+}
+
+/*
+================
+S_Startup
+================
+*/
+export function S_Startup() {
+
+	if ( ! snd_initialized )
+		return;
+
+	if ( audioContext && audioContext.state === 'suspended' ) {
+
+		audioContext.resume();
+
+	}
+
+	sound_started = true;
+
+}
+
+/*
+==================
+S_FindName
+==================
+*/
+function S_FindName( name ) {
+
+	if ( ! name || name.length === 0 ) {
+
+		Con_Printf( 'S_FindName: NULL name\n' );
+		return null;
+
+	}
+
+	if ( name.length >= 64 ) { // MAX_QPATH
+
+		Con_Printf( 'Sound name too long: %s\n', name );
+		return null;
+
+	}
+
+	// see if already loaded
+	for ( let i = 0; i < num_sfx; i ++ ) {
+
+		if ( known_sfx[ i ].name === name ) {
+
+			return known_sfx[ i ];
+
+		}
+
+	}
+
+	if ( num_sfx >= MAX_SFX ) {
+
+		Con_Printf( 'S_FindName: out of sfx_t\n' );
+		return null;
+
+	}
+
+	const sfx = known_sfx[ num_sfx ];
+	sfx.name = name;
+	sfx.cache = null;
+	num_sfx ++;
+
+	return sfx;
+
+}
+
+/*
+==================
+S_PrecacheSound
+==================
+*/
+export function S_PrecacheSound( name ) {
+
+	if ( ! sound_started || nosound.value )
+		return null;
+
+	const sfx = S_FindName( name );
+
+	// cache it in
+	if ( precache.value )
+		S_LoadSound( sfx );
+
+	return sfx;
+
+}
+
+/*
+==================
+S_TouchSound
+==================
+*/
+export function S_TouchSound( name ) {
+
+	if ( ! sound_started || nosound.value )
+		return;
+
+	S_FindName( name );
+
+}
+
+/*
+==================
+SND_PickChannel
+
+Picks a channel based on priorities, empty slots, number of channels
+==================
+*/
+export function SND_PickChannel( entnum, entchannel ) {
+
+	// Check for replacement sound, or find the best one to replace
+	let first_to_die = - 1;
+	let first_empty = - 1;
+	let first_finished = - 1;
+	let life_left = 0x7fffffff;
+
+	for ( let ch_idx = NUM_AMBIENTS; ch_idx < NUM_AMBIENTS + MAX_DYNAMIC_CHANNELS; ch_idx ++ ) {
+
+		// Always override sound from same entity on same channel
+		if ( entchannel !== 0 &&
+			channels[ ch_idx ].entnum === entnum &&
+			( channels[ ch_idx ].entchannel === entchannel || entchannel === - 1 ) ) {
+
+			first_to_die = ch_idx;
+			break;
+
+		}
+
+		// Track empty channels (never used or fully cleared)
+		if ( ! channels[ ch_idx ].sfx && first_empty === - 1 ) {
+
+			first_empty = ch_idx;
+			continue;
+
+		}
+
+		// Track channels where audio has finished playing (Web Audio onended fired)
+		if ( channels[ ch_idx ].sfx && ! channels[ ch_idx ]._audioSource && first_finished === - 1 ) {
+
+			first_finished = ch_idx;
+			continue;
+
+		}
+
+		// Don't let monster sounds override player sounds
+		if ( channels[ ch_idx ].entnum === 1 && entnum !== 1 && channels[ ch_idx ].sfx )
+			continue;
+
+		// Track channel with least time remaining (fallback)
+		if ( channels[ ch_idx ].end - paintedtime < life_left ) {
+
+			life_left = channels[ ch_idx ].end - paintedtime;
+			first_to_die = ch_idx;
+
+		}
+
+	}
+
+	// Priority: same entity/channel > empty channel > finished channel > oldest channel
+	if ( first_to_die === - 1 ) {
+
+		if ( first_empty !== - 1 ) {
+
+			first_to_die = first_empty;
+
+		} else if ( first_finished !== - 1 ) {
+
+			first_to_die = first_finished;
+
+		}
+
+	}
+
+	if ( first_to_die === - 1 ) {
+
+		if ( snd_show.value ) {
+
+			console.log( 'SND_PickChannel: no free channel!' );
+
+		}
+
+		return null;
+
+	}
+
+	if ( snd_show.value && channels[ first_to_die ].sfx ) {
+
+		console.log( 'SND_PickChannel: replacing', channels[ first_to_die ].sfx.name, 'on ch', first_to_die );
+
+	}
+
+	if ( channels[ first_to_die ].sfx )
+		channels[ first_to_die ].sfx = null;
+
+	// Stop any existing Web Audio source on this channel
+	if ( channels[ first_to_die ]._audioSource ) {
+
+		try {
+
+			channels[ first_to_die ]._audioSource.stop();
+
+		} catch ( e ) { /* ignore */ }
+
+		channels[ first_to_die ]._audioSource = null;
+		channels[ first_to_die ]._gainNode = null;
+		channels[ first_to_die ]._panNode = null;
+
+	}
+
+	return channels[ first_to_die ];
+
+}
+
+/*
+=================
+SND_Spatialize
+=================
+*/
+export function SND_Spatialize( ch ) {
+
+	// anything coming from the view entity will always be full volume
+	if ( ch.entnum === 0 ) { // cl.viewentity equivalent
+
+		ch.leftvol = ch.master_vol;
+		ch.rightvol = ch.master_vol;
+		return;
+
+	}
+
+	// calculate stereo separation and distance attenuation
+	const source = ch.origin;
+	const dx = source[ 0 ] - listener_origin[ 0 ];
+	const dy = source[ 1 ] - listener_origin[ 1 ];
+	const dz = source[ 2 ] - listener_origin[ 2 ];
+
+	let dist = Math.sqrt( dx * dx + dy * dy + dz * dz );
+	dist -= 80; // SOUND_FULLVOLUME
+	if ( dist < 0 ) dist = 0;
+
+	// distance attenuation
+	let lscale, rscale;
+
+	if ( ch.dist_mult ) {
+
+		const att = 1.0 - dist * ch.dist_mult;
+		if ( att < 0 ) {
+
+			ch.leftvol = 0;
+			ch.rightvol = 0;
+			return;
+
+		}
+
+		lscale = att;
+		rscale = att;
+
+	} else {
+
+		lscale = 1.0;
+		rscale = 1.0;
+
+	}
+
+	// stereo panning based on dot product with listener_right
+	const dot = dx * listener_right[ 0 ] + dy * listener_right[ 1 ] + dz * listener_right[ 2 ];
+
+	if ( dist > 0 ) {
+
+		rscale *= ( 1.0 + dot / dist );
+		lscale *= ( 1.0 - dot / dist );
+
+	}
+
+	ch.leftvol = Math.floor( ch.master_vol * lscale );
+	ch.rightvol = Math.floor( ch.master_vol * rscale );
+
+	if ( ch.leftvol < 0 ) ch.leftvol = 0;
+	if ( ch.rightvol < 0 ) ch.rightvol = 0;
+
+}
+
+/*
+=================
+S_StartSound
+=================
+*/
+export function S_StartSound( entnum, entchannel, sfx, origin, fvol, attenuation ) {
+
+	if ( ! sound_started || ! sfx )
+		return;
+
+	if ( nosound.value )
+		return;
+
+	const vol = Math.floor( fvol * 255 );
+
+	// pick a channel to play on
+	const target_chan = SND_PickChannel( entnum, entchannel );
+	if ( ! target_chan ) {
+
+		if ( snd_show.value )
+			console.log( 'S_StartSound: no channel for', sfx.name );
+
+		return;
+
+	}
+
+	// Debug: log sound being played
+	if ( snd_show.value ) {
+
+		const ch_idx = channels.indexOf( target_chan );
+		console.log( 'S_StartSound:', sfx.name, 'ent:', entnum, 'ch:', entchannel, '-> slot', ch_idx );
+
+	}
+
+	// spatialize
+	target_chan.origin[ 0 ] = origin[ 0 ];
+	target_chan.origin[ 1 ] = origin[ 1 ];
+	target_chan.origin[ 2 ] = origin[ 2 ];
+	target_chan.dist_mult = attenuation / sound_nominal_clip_dist;
+	target_chan.master_vol = vol;
+	target_chan.entnum = entnum;
+	target_chan.entchannel = entchannel;
+
+	SND_Spatialize( target_chan );
+
+	if ( ! target_chan.leftvol && ! target_chan.rightvol )
+		return; // not audible at all
+
+	// new channel
+	const sc = S_LoadSound( sfx );
+	if ( ! sc ) {
+
+		target_chan.sfx = null;
+		if ( snd_show.value )
+			console.log( 'S_StartSound: failed to load', sfx.name );
+		return; // couldn't load the sound's data
+
+	}
+
+	// Verify the sound data is valid
+	if ( ! sc.data || sc.length === 0 ) {
+
+		target_chan.sfx = null;
+		if ( snd_show.value )
+			console.log( 'S_StartSound: invalid sound data for', sfx.name );
+		return;
+
+	}
+
+	target_chan.sfx = sfx;
+	target_chan.pos = 0;
+	target_chan.end = paintedtime + sc.length;
+
+	// Play using Web Audio API
+	_playWebAudio( sc, target_chan );
+
+}
+
+/*
+=================
+S_StopSound
+=================
+*/
+export function S_StopSound( entnum, entchannel ) {
+
+	for ( let i = 0; i < MAX_DYNAMIC_CHANNELS; i ++ ) {
+
+		if ( channels[ i ].entnum === entnum &&
+			channels[ i ].entchannel === entchannel ) {
+
+			channels[ i ].end = 0;
+			channels[ i ].sfx = null;
+
+			if ( channels[ i ]._audioSource ) {
+
+				try {
+
+					channels[ i ]._audioSource.stop();
+
+				} catch ( e ) { /* ignore */ }
+
+				channels[ i ]._audioSource = null;
+				channels[ i ]._gainNode = null;
+				channels[ i ]._panNode = null;
+
+			}
+
+			return;
+
+		}
+
+	}
+
+}
+
+/*
+=================
+S_StopAllSounds
+=================
+*/
+export function S_StopAllSounds( clear ) {
+
+	if ( ! sound_started )
+		return;
+
+	Sound_SetTotalChannels( MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS );
+
+	for ( let i = 0; i < MAX_CHANNELS; i ++ ) {
+
+		if ( channels[ i ].sfx ) {
+
+			channels[ i ].sfx = null;
+
+		}
+
+		channels[ i ].end = 0;
+
+		if ( channels[ i ]._audioSource ) {
+
+			try {
+
+				channels[ i ]._audioSource.stop();
+
+			} catch ( e ) { /* ignore */ }
+
+			channels[ i ]._audioSource = null;
+			channels[ i ]._gainNode = null;
+			channels[ i ]._panNode = null;
+
+		}
+
+	}
+
+	if ( clear )
+		S_ClearBuffer();
+
+}
+
+function S_StopAllSoundsC() {
+
+	S_StopAllSounds( true );
+
+}
+
+/*
+=================
+S_ClearBuffer
+=================
+*/
+export function S_ClearBuffer() {
+
+	if ( ! sound_started || ! shm )
+		return;
+
+	if ( shm.buffer ) {
+
+		shm.buffer.fill( 0 );
+
+	}
+
+}
+
+/*
+=================
+S_Update
+=================
+*/
+export function S_Update( origin, forward, right, up ) {
+
+	if ( ! sound_started || nosound.value )
+		return;
+
+	listener_origin[ 0 ] = origin[ 0 ];
+	listener_origin[ 1 ] = origin[ 1 ];
+	listener_origin[ 2 ] = origin[ 2 ];
+
+	listener_forward[ 0 ] = forward[ 0 ];
+	listener_forward[ 1 ] = forward[ 1 ];
+	listener_forward[ 2 ] = forward[ 2 ];
+
+	listener_right[ 0 ] = right[ 0 ];
+	listener_right[ 1 ] = right[ 1 ];
+	listener_right[ 2 ] = right[ 2 ];
+
+	listener_up[ 0 ] = up[ 0 ];
+	listener_up[ 1 ] = up[ 1 ];
+	listener_up[ 2 ] = up[ 2 ];
+
+	// Update master volume
+	if ( masterGain ) {
+
+		masterGain.gain.value = volume.value;
+
+	}
+
+	// Update spatialization for all active channels
+	for ( let i = 0; i < total_channels; i ++ ) {
+
+		const ch = channels[ i ];
+
+		if ( ! ch.sfx )
+			continue;
+
+		// Recalculate spatialization based on new listener position
+		SND_Spatialize( ch );
+
+		const isStatic = i >= NUM_AMBIENTS + MAX_DYNAMIC_CHANNELS;
+		const isAudible = ch.leftvol > 0 || ch.rightvol > 0;
+
+		if ( isStatic ) {
+
+			// Static/ambient sounds: start/stop based on audibility
+			if ( isAudible && ! ch._audioSource ) {
+
+				// Sound became audible - start playing
+				const sc = S_LoadSound( ch.sfx );
+				if ( sc ) {
+
+					_playWebAudio( sc, ch );
+
+				}
+
+			} else if ( ! isAudible && ch._audioSource ) {
+
+				// Sound became inaudible - stop playing
+				try {
+
+					ch._audioSource.stop();
+
+				} catch ( e ) { /* ignore */ }
+
+				ch._audioSource = null;
+				ch._gainNode = null;
+				ch._panNode = null;
+
+			} else if ( isAudible && ch._audioSource ) {
+
+				// Update volume and panning for playing static sound
+				_updateWebAudioSpatial( ch );
+
+			}
+
+		} else if ( ch._audioSource ) {
+
+			// Dynamic sounds: just update volume/panning
+			_updateWebAudioSpatial( ch );
+
+		}
+
+	}
+
+}
+
+/*
+=================
+S_ExtraUpdate
+
+Called from other places to update sound while loading, etc.
+=================
+*/
+export function S_ExtraUpdate() {
+
+	if ( snd_noextraupdate.value )
+		return;
+
+	// In Web Audio, nothing special needed
+
+}
+
+/*
+=================
+S_LocalSound
+
+Play a sound at full volume, no attenuation
+=================
+*/
+export function S_LocalSound( name ) {
+
+	if ( ! sound_started || nosound.value )
+		return;
+
+	const sfx = S_PrecacheSound( name );
+	if ( ! sfx ) {
+
+		Con_Printf( 'S_LocalSound: can\'t cache %s\n', name );
+		return;
+
+	}
+
+	S_StartSound( 0, - 1, sfx, listener_origin, 1, 1 );
+
+}
+
+/*
+==================
+S_StaticSound
+==================
+*/
+export function S_StaticSound( sfx, origin, fvol, attenuation ) {
+
+	if ( ! sfx || ! sound_started )
+		return;
+
+	if ( total_channels >= MAX_CHANNELS ) {
+
+		Con_Printf( 'total_channels == MAX_CHANNELS\n' );
+		return;
+
+	}
+
+	const ss = channels[ total_channels ];
+	Sound_SetTotalChannels( total_channels + 1 );
+
+	const sc = S_LoadSound( sfx );
+	if ( ! sc )
+		return;
+
+	ss.sfx = sfx;
+	ss.origin[ 0 ] = origin[ 0 ];
+	ss.origin[ 1 ] = origin[ 1 ];
+	ss.origin[ 2 ] = origin[ 2 ];
+	ss.master_vol = Math.floor( fvol * 255 );
+	ss.dist_mult = ( attenuation / 64 ) / sound_nominal_clip_dist;
+	ss.entnum = - 1; // -1 = static world sound, not from any entity
+	ss.entchannel = 0;
+
+	ss.end = paintedtime + sc.length;
+
+	SND_Spatialize( ss );
+
+	// NOTE: Static/ambient sounds need continuous spatial updates every frame.
+	// For now, we don't play them immediately - they require proper management
+	// in S_Update to start/stop based on player distance.
+	// TODO: Implement proper static sound spatialization in S_Update
+
+}
+
+/*
+=================
+S_ClearPrecache
+=================
+*/
+export function S_ClearPrecache() {
+
+	// nothing to do in web audio
+
+}
+
+/*
+=================
+S_BeginPrecaching
+=================
+*/
+export function S_BeginPrecaching() {
+
+	// nothing to do
+
+}
+
+/*
+=================
+S_EndPrecaching
+=================
+*/
+export function S_EndPrecaching() {
+
+	// nothing to do
+
+}
+
+/*
+=================
+S_AmbientOff / S_AmbientOn
+=================
+*/
+export function S_AmbientOff() {
+
+	// stub
+
+}
+
+export function S_AmbientOn() {
+
+	// stub
+
+}
+
+/*
+==============================================================================
+
+			COMMANDS
+
+==============================================================================
+*/
+
+function S_Play() {
+
+	for ( let i = 1; i < Cmd_Argc(); i ++ ) {
+
+		let name = Cmd_Argv( i );
+		if ( name.indexOf( '.' ) === - 1 )
+			name += '.wav';
+
+		const sfx = S_PrecacheSound( name );
+		S_StartSound( 0, 0, sfx, listener_origin, 1.0, 1.0 );
+
+	}
+
+}
+
+function S_PlayVol() {
+
+	for ( let i = 1; i < Cmd_Argc(); i += 2 ) {
+
+		let name = Cmd_Argv( i );
+		if ( name.indexOf( '.' ) === - 1 )
+			name += '.wav';
+
+		const sfx = S_PrecacheSound( name );
+		const vol = parseFloat( Cmd_Argv( i + 1 ) ) || 1.0;
+		S_StartSound( 0, 0, sfx, listener_origin, vol, 1.0 );
+
+	}
+
+}
+
+function S_SoundList() {
+
+	let total = 0;
+
+	for ( let i = 0; i < num_sfx; i ++ ) {
+
+		const sfx = known_sfx[ i ];
+		const sc = sfx.cache;
+		if ( ! sc ) continue;
+
+		const size = sc.length * sc.width * ( sc.stereo + 1 );
+		total += size;
+
+		let info = '';
+		if ( sc.loopstart >= 0 ) info += 'L';
+		else info += ' ';
+
+		Con_Printf( '%s : %d (%s)\n', sfx.name, size, info );
+
+	}
+
+	Con_Printf( 'Total resident: %d\n', total );
+
+}
+
+function S_SoundInfo_f() {
+
+	if ( ! sound_started || ! shm ) {
+
+		Con_Printf( 'sound system not started\n' );
+		return;
+
+	}
+
+	Con_Printf( '%d bit, %s, %d Hz\n',
+		shm.samplebits,
+		( shm.channels === 2 ) ? 'stereo' : 'mono',
+		shm.speed );
+
+}
+
+/*
+==============================================================================
+
+			WEB AUDIO PLAYBACK HELPER
+
+==============================================================================
+*/
+
+function _playWebAudio( sc, chan ) {
+
+	if ( ! audioContext || ! sc || ! sc.data )
+		return;
+
+	try {
+
+		// Cache AudioBuffer on the sfxcache to avoid recreating it every play
+		let audioBuffer = sc._audioBuffer;
+
+		if ( ! audioBuffer ) {
+
+			const sampleRate = sc.speed || 11025;
+			const numSamples = sc.length;
+			const numChannels = sc.stereo ? 2 : 1;
+
+			audioBuffer = audioContext.createBuffer( numChannels, numSamples, sampleRate );
+
+			const channelData = audioBuffer.getChannelData( 0 );
+
+			if ( sc.width === 1 ) {
+
+				// 8-bit unsigned
+				for ( let i = 0; i < numSamples; i ++ )
+					channelData[ i ] = ( sc.data[ i ] - 128 ) / 128.0;
+
+			} else {
+
+				// 16-bit signed
+				const view = new DataView( sc.data.buffer, sc.data.byteOffset );
+				for ( let i = 0; i < numSamples; i ++ )
+					channelData[ i ] = view.getInt16( i * 2, true ) / 32768.0;
+
+			}
+
+			sc._audioBuffer = audioBuffer;
+
+		}
+
+		const source = audioContext.createBufferSource();
+		source.buffer = audioBuffer;
+
+		// Looping
+		if ( sc.loopstart >= 0 ) {
+
+			source.loop = true;
+			source.loopStart = sc.loopstart / sampleRate;
+			source.loopEnd = numSamples / sampleRate;
+
+		}
+
+		// Volume (master gain already applies volume.value, so only use channel volume here)
+		const gainNode = audioContext.createGain();
+		const vol = Math.max( chan.leftvol, chan.rightvol ) / 255.0;
+		gainNode.gain.value = vol;
+
+		// Stereo panning
+		let panNode = null;
+		if ( audioContext.createStereoPanner ) {
+
+			panNode = audioContext.createStereoPanner();
+			if ( chan.leftvol + chan.rightvol > 0 ) {
+
+				panNode.pan.value = ( chan.rightvol - chan.leftvol ) / ( chan.leftvol + chan.rightvol );
+
+			}
+
+		}
+
+		// Connect: source -> gain -> pan -> master
+		source.connect( gainNode );
+		if ( panNode ) {
+
+			gainNode.connect( panNode );
+			panNode.connect( masterGain );
+
+		} else {
+
+			gainNode.connect( masterGain );
+
+		}
+
+		// Store references for updating and stopping
+		chan._audioSource = source;
+		chan._gainNode = gainNode;
+		chan._panNode = panNode;
+
+		// Handle sound completion for non-looping sounds
+		if ( ! source.loop ) {
+
+			source.onended = function () {
+
+				// Mark channel as finished
+				if ( chan._audioSource === source ) {
+
+					chan._audioSource = null;
+					chan._gainNode = null;
+					chan._panNode = null;
+					chan.sfx = null;
+					chan.end = 0;
+
+				}
+
+			};
+
+		}
+
+		source.start();
+
+		if ( snd_show.value >= 2 ) {
+
+			console.log( 'Playing:', chan.sfx ? chan.sfx.name : '?',
+				'len:', sc.length, 'rate:', sc.speed, 'loop:', sc.loopstart >= 0 );
+
+		}
+
+	} catch ( e ) {
+
+		Con_DPrintf( 'Web Audio playback error: %s\n', e.message );
+
+	}
+
+}
+
+/*
+=================
+_updateWebAudioSpatial
+
+Updates volume and panning for a playing sound based on current spatialization
+=================
+*/
+function _updateWebAudioSpatial( chan ) {
+
+	if ( ! chan._gainNode )
+		return;
+
+	// Update volume
+	const vol = Math.max( chan.leftvol, chan.rightvol ) / 255.0;
+	chan._gainNode.gain.value = vol;
+
+	// Update panning
+	if ( chan._panNode && ( chan.leftvol + chan.rightvol ) > 0 ) {
+
+		chan._panNode.pan.value = ( chan.rightvol - chan.leftvol ) / ( chan.leftvol + chan.rightvol );
+
+	}
+
+}
+
+/*
+================
+S_GetAudioContext
+
+Returns the Web Audio AudioContext for use by other modules (e.g. cd_audio)
+================
+*/
+export function S_GetAudioContext() {
+
+	return audioContext;
+
+}
+
+export function S_GetMasterGain() {
+
+	return masterGain;
+
+}
