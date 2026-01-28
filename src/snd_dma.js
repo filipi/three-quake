@@ -15,6 +15,7 @@ import {
 	Sound_SetTotalChannels, Sound_SetPaintedtime, Sound_SetShm, Sound_SetInitialized
 } from './sound.js';
 import { S_LoadSound } from './snd_mem.js';
+import { cl } from './client.js';
 
 /*
 ==============================================================================
@@ -364,7 +365,7 @@ SND_Spatialize
 export function SND_Spatialize( ch ) {
 
 	// anything coming from the view entity will always be full volume
-	if ( ch.entnum === 0 ) { // cl.viewentity equivalent
+	if ( ch.entnum === cl.viewentity ) {
 
 		ch.leftvol = ch.master_vol;
 		ch.rightvol = ch.master_vol;
@@ -374,53 +375,36 @@ export function SND_Spatialize( ch ) {
 
 	// calculate stereo separation and distance attenuation
 	const source = ch.origin;
-	const dx = source[ 0 ] - listener_origin[ 0 ];
-	const dy = source[ 1 ] - listener_origin[ 1 ];
-	const dz = source[ 2 ] - listener_origin[ 2 ];
+	let source_vec_0 = source[ 0 ] - listener_origin[ 0 ];
+	let source_vec_1 = source[ 1 ] - listener_origin[ 1 ];
+	let source_vec_2 = source[ 2 ] - listener_origin[ 2 ];
 
-	let dist = Math.sqrt( dx * dx + dy * dy + dz * dz );
-	dist -= 80; // SOUND_FULLVOLUME
-	if ( dist < 0 ) dist = 0;
-
-	// distance attenuation
-	let lscale, rscale;
-
-	if ( ch.dist_mult ) {
-
-		const att = 1.0 - dist * ch.dist_mult;
-		if ( att < 0 ) {
-
-			ch.leftvol = 0;
-			ch.rightvol = 0;
-			return;
-
-		}
-
-		lscale = att;
-		rscale = att;
-
-	} else {
-
-		lscale = 1.0;
-		rscale = 1.0;
-
-	}
-
-	// stereo panning based on dot product with listener_right
-	const dot = dx * listener_right[ 0 ] + dy * listener_right[ 1 ] + dz * listener_right[ 2 ];
-
+	// VectorNormalize: get length then normalize
+	let dist = Math.sqrt( source_vec_0 * source_vec_0 + source_vec_1 * source_vec_1 + source_vec_2 * source_vec_2 );
 	if ( dist > 0 ) {
 
-		rscale *= ( 1.0 + dot / dist );
-		lscale *= ( 1.0 - dot / dist );
+		source_vec_0 /= dist;
+		source_vec_1 /= dist;
+		source_vec_2 /= dist;
 
 	}
 
-	ch.leftvol = Math.floor( ch.master_vol * lscale );
-	ch.rightvol = Math.floor( ch.master_vol * rscale );
+	dist *= ch.dist_mult;
 
-	if ( ch.leftvol < 0 ) ch.leftvol = 0;
+	// dot product with normalized source vector gives [-1, 1]
+	const dot = listener_right[ 0 ] * source_vec_0 + listener_right[ 1 ] * source_vec_1 + listener_right[ 2 ] * source_vec_2;
+
+	let rscale = 1.0 + dot;
+	let lscale = 1.0 - dot;
+
+	// add in distance effect
+	let scale = ( 1.0 - dist ) * rscale;
+	ch.rightvol = Math.floor( ch.master_vol * scale );
 	if ( ch.rightvol < 0 ) ch.rightvol = 0;
+
+	scale = ( 1.0 - dist ) * lscale;
+	ch.leftvol = Math.floor( ch.master_vol * scale );
+	if ( ch.leftvol < 0 ) ch.leftvol = 0;
 
 }
 
