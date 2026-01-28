@@ -924,6 +924,16 @@ function _playWebAudio( sc, chan ) {
 	if ( ! audioContext || ! sc || ! sc.data )
 		return;
 
+	// Resume the AudioContext on first use (requires prior user interaction).
+	// Don't play this sound if still suspended — avoids queuing sounds that
+	// all fire at once when the context finally resumes.
+	if ( audioContext.state === 'suspended' ) {
+
+		audioContext.resume();
+		return;
+
+	}
+
 	try {
 
 		// Cache AudioBuffer on the sfxcache to avoid recreating it every play
