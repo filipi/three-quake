@@ -1,7 +1,7 @@
 // Ported from: WinQuake/host.c -- coordinates spawning and killing of local servers
 
 import { Sys_Printf, Sys_Error, Sys_FloatTime } from './sys.js';
-import { Con_Printf, SZ_Write, SZ_Clear,
+import { Con_Printf, Con_DPrintf, SZ_Write, SZ_Clear,
 	MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat,
 	MSG_WriteString, MSG_WriteAngle } from './common.js';
 import { svc_signonnum, svc_time, svc_updatename, svc_updatefrags,
@@ -326,7 +326,8 @@ export async function Host_Init( parms ) {
 		SCR_BeginLoadingPlaque: SCR_BeginLoadingPlaque,
 		IN_RequestPointerLock: IN_RequestPointerLock,
 		host_time_get: () => host_time,
-		realtime_get: () => realtime
+		realtime_get: () => realtime,
+		CL_NextDemo: CL_NextDemo
 	} );
 
 	SCR_Init();
@@ -451,11 +452,15 @@ export function Host_Frame( time ) {
 
 	} catch ( e ) {
 
-		// Host_Error throws to recover (like C's longjmp).
-		// Log and continue to next frame.
+		// Host_Error and Host_EndGame throw to recover (like C's longjmp).
+		// Catch and continue to next frame.
 		if ( e.message && e.message.startsWith( 'Host_Error:' ) ) {
 
 			Con_Printf( '%s\n', e.message );
+
+		} else if ( e.message && e.message.startsWith( 'Host_EndGame:' ) ) {
+
+			// Normal game end (demo finished, disconnect, etc.) - no need to log
 
 		} else {
 
@@ -589,12 +594,15 @@ export function Host_Error( error ) {
 
 	host_error_reentrancy = true;
 
+	SCR_EndLoadingPlaque(); // reenable screen updates
+
 	Con_Printf( 'Host_Error: ' + error + '\n' );
 
 	if ( sv.active )
 		Host_ShutdownServer( false );
 
 	CL_Disconnect();
+	cls.demonum = - 1;
 
 	host_error_reentrancy = false;
 
@@ -612,18 +620,18 @@ End the current game
 */
 export function Host_EndGame( message ) {
 
-	Con_Printf( '\n===========================\n' );
-	Con_Printf( 'Host_EndGame: ' + message + '\n' );
-	Con_Printf( '===========================\n\n' );
+	Con_DPrintf( 'Host_EndGame: %s\n', message );
 
 	if ( sv.active )
 		Host_ShutdownServer( false );
 
-	// If we're in a demo loop, play the next demo instead of disconnecting
 	if ( cls.demonum !== - 1 )
 		CL_NextDemo();
 	else
 		CL_Disconnect();
+
+	// Throw to unwind the call stack back to Host_Frame (like C's longjmp)
+	throw new Error( 'Host_EndGame: ' + message );
 
 }
 

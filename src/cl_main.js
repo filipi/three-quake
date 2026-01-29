@@ -28,7 +28,7 @@ import { anglemod, VectorCopy, VectorSubtract, VectorMA, AngleVectors, DotProduc
 import { R_RocketTrail } from './render.js';
 import { CL_InitTEnts, CL_UpdateTEnts } from './cl_tent.js';
 import { host_frametime, realtime, host_framecount, Host_Error, Host_EndGame } from './host.js';
-import { SCR_EndLoadingPlaque } from './gl_screen.js';
+import { SCR_EndLoadingPlaque, SCR_BeginLoadingPlaque } from './gl_screen.js';
 import { S_StopAllSounds } from './snd_dma.js';
 
 // we need to declare some mouse variables here, because the menu system
@@ -294,7 +294,7 @@ export function CL_NextDemo() {
 	if ( cls.demonum === - 1 )
 		return; // don't play demos
 
-	// SCR_BeginLoadingPlaque();
+	SCR_BeginLoadingPlaque();
 
 	if ( ! cls.demos[ cls.demonum ] || cls.demonum === MAX_DEMOS ) {
 
