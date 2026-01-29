@@ -97,9 +97,11 @@ export function R_RenderDlight( light, dlightIndex ) {
 	VectorSubtract( light.origin, r_origin, _dlightV );
 	if ( Length( _dlightV ) < rad ) {
 
-		// view is inside the dlight
+		// view is inside the dlight - add screen blend
 		AddLightBlend( 1, 0.5, 0, light.radius * 0.0003 );
-		return null;
+		// Note: Still create the PointLight even when inside - it should
+		// still illuminate surfaces (unlike the original corona which
+		// would be invisible/behind the camera when inside)
 
 	}
 
