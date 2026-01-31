@@ -74,6 +74,39 @@ export function createRoom(config: RoomConfig): Room | null {
 }
 
 /**
+ * Create a room with a specific ID (for shared links)
+ * Returns null if room limit is reached
+ */
+export function createRoomWithId(id: string, config: RoomConfig): Room | null {
+	// Check room limit
+	if (rooms.size >= MAX_ROOMS) {
+		Sys_Printf('Room limit reached (%d), rejecting room creation\n', MAX_ROOMS);
+		return null;
+	}
+
+	// Check if room already exists
+	if (rooms.has(id.toUpperCase())) {
+		return rooms.get(id.toUpperCase())!;
+	}
+
+	const room: Room = {
+		id: id.toUpperCase(),
+		name: `Shared Game`,
+		map: config.map,
+		maxPlayers: config.maxPlayers,
+		playerCount: 0,
+		hostName: config.hostName,
+		createdAt: Date.now(),
+		lastActivity: Date.now(),
+	};
+
+	rooms.set(id.toUpperCase(), room);
+	Sys_Printf('Room auto-created: %s (map: %s, max: %d) [%d/%d rooms]\n', id, config.map, config.maxPlayers, rooms.size, MAX_ROOMS);
+
+	return room;
+}
+
+/**
  * Get a room by ID
  */
 export function getRoom(id: string): Room | undefined {

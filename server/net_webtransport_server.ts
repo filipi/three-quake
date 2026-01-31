@@ -2,7 +2,7 @@
 // Handles incoming client connections via WebTransport/HTTP3
 
 import { Sys_Printf } from './sys_server.ts';
-import { listRooms, createRoom, getRoom, updateRoomPlayerCount, type Room } from './rooms.ts';
+import { listRooms, createRoom, createRoomWithId, getRoom, updateRoomPlayerCount, type Room } from './rooms.ts';
 import { net_message } from '../src/net.js';
 
 // Server configuration
@@ -512,11 +512,21 @@ async function _handleLobbyProtocol(
 
 			case LOBBY_JOIN: {
 				// Join existing room - room ID is in msg.data
-				const roomId = new TextDecoder().decode(msg.data).trim();
-				const room = getRoom(roomId);
+				const roomId = new TextDecoder().decode(msg.data).trim().toUpperCase();
+				let room = getRoom(roomId);
+
+				// Auto-create room for specific shared link (3LUVYZ)
+				if (!room && roomId === '3LUVYZ') {
+					Sys_Printf('Auto-creating shared room: ' + roomId + '\n');
+					room = createRoomWithId(roomId, {
+						map: 'start',
+						maxPlayers: 16,
+						hostName: 'Shared'
+					});
+				}
+
 				if (!room) {
 					Sys_Printf('Room not found: ' + roomId + '\n');
-					// Send error response
 					const errorMsg = 'Room not found. The game may have ended.';
 					const errorData = new TextEncoder().encode(errorMsg);
 					const response = new Uint8Array(3 + errorData.length);
@@ -533,8 +543,8 @@ async function _handleLobbyProtocol(
 				Sys_Printf('Client joining room: ' + roomId + '\n');
 
 				// Track room membership and update player count
-				conn.roomId = roomId;
-				updateRoomPlayerCount(roomId, room.playerCount + 1);
+				conn.roomId = room.id;
+				updateRoomPlayerCount(room.id, room.playerCount + 1);
 
 				// Check if we need to change map for this room
 				if (_mapChangeCallback != null && _getCurrentMap != null) {
