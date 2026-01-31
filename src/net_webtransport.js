@@ -693,18 +693,21 @@ export async function WT_Connect( host ) {
 		_WT_StartBackgroundReaders( sock, conn );
 
 		// Handle connection close
+		// Per original Quake design: don't set sock.disconnected here
+		// Only set conn.connected = false, which makes WT_QGetMessage return -1
+		// This triggers proper cleanup via Host_Error -> CL_Disconnect -> NET_Close
 		transport.closed.then( () => {
 
 			Con_Printf( 'WebTransport connection closed\n' );
 			conn.connected = false;
-			sock.disconnected = true;
+			// Note: Don't set sock.disconnected - that's only set by NET_FreeQSocket
 
 		} ).catch( ( error ) => {
 
 			Con_Printf( 'WebTransport connection error: ' + error.message + '\n' );
 			conn.connected = false;
 			conn.error = error;
-			sock.disconnected = true;
+			// Note: Don't set sock.disconnected - that's only set by NET_FreeQSocket
 
 		} );
 
@@ -791,18 +794,21 @@ async function _WT_ConnectDirect( url, originalHost ) {
 		_WT_StartBackgroundReaders( sock, conn );
 
 		// Handle connection close
+		// Per original Quake design: don't set sock.disconnected here
+		// Only set conn.connected = false, which makes WT_QGetMessage return -1
+		// This triggers proper cleanup via Host_Error -> CL_Disconnect -> NET_Close
 		transport.closed.then( () => {
 
 			Con_Printf( 'WebTransport connection closed\n' );
 			conn.connected = false;
-			sock.disconnected = true;
+			// Note: Don't set sock.disconnected - that's only set by NET_FreeQSocket
 
 		} ).catch( ( error ) => {
 
 			Con_Printf( 'WebTransport connection error: ' + error.message + '\n' );
 			conn.connected = false;
 			conn.error = error;
-			sock.disconnected = true;
+			// Note: Don't set sock.disconnected - that's only set by NET_FreeQSocket
 
 		} );
 

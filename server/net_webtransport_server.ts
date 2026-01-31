@@ -107,12 +107,20 @@ const NET_MAXMESSAGE = 8192;
 // Callback for socket allocation (injected from game_server.js)
 // This allows using the shared socket pool from net_main.js
 let _NET_NewQSocket: (() => QSocket | null) | null = null;
+let _NET_FreeQSocket: ((sock: QSocket) => void) | null = null;
 
 /**
  * Set the socket allocator callback
  */
 export function WT_SetSocketAllocator(allocator: () => QSocket | null): void {
 	_NET_NewQSocket = allocator;
+}
+
+/**
+ * Set the socket freer callback
+ */
+export function WT_SetSocketFreer(freer: (sock: QSocket) => void): void {
+	_NET_FreeQSocket = freer;
 }
 
 /**
@@ -326,12 +334,10 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
 
 		wt.closed.then(() => {
 			Sys_Printf('WebTransport closed: ' + address + '\n');
-			clientConn.connected = false;
-			sock.disconnected = true;
+			_handleConnectionDeath(sock, clientConn);
 		}).catch((error) => {
 			Sys_Printf('WebTransport error: ' + (error as Error).message + '\n');
-			clientConn.connected = false;
-			sock.disconnected = true;
+			_handleConnectionDeath(sock, clientConn);
 		});
 
 	} catch (error) {
@@ -432,12 +438,10 @@ async function _handleNewConnection(conn: any): Promise<void> {
 		// Handle connection close
 		wt.closed.then(() => {
 			Sys_Printf('WebTransport closed: ' + address + '\n');
-			clientConn.connected = false;
-			sock.disconnected = true;
+			_handleConnectionDeath(sock, clientConn);
 		}).catch((error) => {
 			Sys_Printf('WebTransport error: ' + (error as Error).message + '\n');
-			clientConn.connected = false;
-			sock.disconnected = true;
+			_handleConnectionDeath(sock, clientConn);
 		});
 
 	} catch (error) {
@@ -839,6 +843,51 @@ function _newQSocket(): QSocket | null {
 }
 
 /**
+ * Handle connection death (WebTransport closed or errored)
+ *
+ * Per original Quake design (net_main.c):
+ * - sock.disconnected is ONLY set by NET_FreeQSocket (after freeing)
+ * - We should NOT set it here for sockets assigned to clients
+ * - Just set conn.connected = false, which makes WT_QGetMessage return -1
+ * - This triggers SV_DropClient -> NET_Close -> WT_Close + NET_FreeQSocket
+ *
+ * Exception: sockets still in pendingConnections were never assigned to a client,
+ * so we must clean them up directly (including setting disconnected and freeing).
+ */
+function _handleConnectionDeath(sock: QSocket, conn: ClientConnection): void {
+	conn.connected = false;
+
+	// Check if socket is still in pending queue (never assigned to a client)
+	const pendingIdx = pendingConnections.indexOf(sock);
+	if (pendingIdx !== -1) {
+		// Socket never made it to a client slot - clean up directly
+		pendingConnections.splice(pendingIdx, 1);
+		sock.disconnected = true;  // Only set for pending sockets
+		Sys_Printf('Removed dead socket from pending queue\n');
+
+		// Decrement player count if client was in a room
+		if (conn.roomId !== null) {
+			const room = getRoom(conn.roomId);
+			if (room !== undefined && room.playerCount > 0) {
+				updateRoomPlayerCount(conn.roomId, room.playerCount - 1);
+				Sys_Printf('Player left room %s (pending died), count now %d\n', conn.roomId, room.playerCount - 1);
+			}
+			conn.roomId = null;
+		}
+
+		// Free the socket back to the pool (only for pending sockets)
+		if (_NET_FreeQSocket !== null) {
+			_NET_FreeQSocket(sock);
+			Sys_Printf('Pending socket freed back to pool\n');
+		}
+	}
+	// For sockets already assigned to clients:
+	// - DON'T set sock.disconnected = true (would skip NET_Close cleanup)
+	// - conn.connected = false makes WT_QGetMessage return -1
+	// - This triggers SV_DropClient -> NET_Close -> WT_Close + NET_FreeQSocket
+}
+
+/**
  * Free a socket
  */
 export function WT_FreeQSocket(sock: QSocket): void {
@@ -881,8 +930,18 @@ export function WT_Connect(_host: string): null {
  * Check for new incoming connections
  */
 export function WT_CheckNewConnections(): QSocket | null {
-	if (pendingConnections.length === 0) return null;
-	return pendingConnections.shift()!;
+	// Filter out any disconnected sockets first
+	while (pendingConnections.length > 0) {
+		const sock = pendingConnections[0];
+		if (sock.disconnected) {
+			// Socket died before we could process it, remove and continue
+			pendingConnections.shift();
+			Sys_Printf('Skipped disconnected socket in pending queue\n');
+			continue;
+		}
+		return pendingConnections.shift()!;
+	}
+	return null;
 }
 
 /**

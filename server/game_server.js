@@ -39,8 +39,9 @@ import {
 	WT_SetSocketAllocator,
 	WT_SetMapCallbacks,
 	WT_SetDirectMode,
+	WT_SetSocketFreer,
 } from './net_webtransport_server.ts';
-import { NET_NewQSocket } from '../src/net_main.js';
+import { NET_NewQSocket, NET_FreeQSocket } from '../src/net_main.js';
 
 // Global unhandled rejection handler - prevent server crashes from async errors
 globalThis.addEventListener('unhandledrejection', (event) => {
@@ -179,8 +180,9 @@ async function Host_Init_Server() {
 	set_net_driverlevel(1);
 	WT_SetDriverLevel(1);
 
-	// Pass the socket allocator to the WebTransport driver so it uses the shared pool
+	// Pass the socket allocator and freer to the WebTransport driver so it uses the shared pool
 	WT_SetSocketAllocator(NET_NewQSocket);
+	WT_SetSocketFreer(NET_FreeQSocket);
 
 	// Initialize server systems
 	PR_Init();
