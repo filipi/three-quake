@@ -223,24 +223,19 @@ async function _acceptConnections(): Promise<void> {
 		// Accept connections using listener.accept() which returns QuicConn directly
 		while (quicEndpoint) {
 			try {
-				Sys_Printf('Waiting for connection...\n');
-
 				// Use listener.accept() to get QuicConn directly
 				const conn = await listener.accept();
 
 				const remoteAddr = conn.remoteAddr;
 				const address = remoteAddr.hostname + ':' + remoteAddr.port;
-				Sys_Printf('Accepted connection from ' + address + '\n');
+				Sys_Printf('Connection from ' + address + '\n');
 
 				// Handle in background
 				(async () => {
 					try {
 						// Upgrade to WebTransport
-						Sys_Printf('Upgrading to WebTransport...\n');
 						// @ts-ignore - unstable API
 						const wt: WebTransport = await Deno.upgradeWebTransport(conn);
-						Sys_Printf('WebTransport upgrade successful!\n');
-
 						await _handleWebTransportSession(wt, address);
 					} catch (error) {
 						Sys_Printf('Connection error: ' + (error as Error).message + '\n');
@@ -273,12 +268,8 @@ const LOBBY_ERROR = 0x82;   // Error response
  * Handle an already-upgraded WebTransport session
  */
 async function _handleWebTransportSession(wt: WebTransport, address: string): Promise<void> {
-	Sys_Printf('Handling WebTransport session from ' + address + '\n');
-
 	try {
 		await wt.ready;
-		Sys_Printf('WebTransport session ready\n');
-		Sys_Printf('Waiting for bidirectional stream from client...\n');
 
 		const clientConn: ClientConnection = {
 			id: nextConnectionId++,
@@ -298,25 +289,16 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
 		const { value: stream, done } = await streamReader.read();
 		streamReader.releaseLock();
 
-		Sys_Printf('Got stream: done=' + done + ', stream=' + (stream ? 'yes' : 'no') + '\n');
-
 		if (done || !stream) {
-			Sys_Printf('Client disconnected before establishing stream\n');
 			wt.close();
 			return;
 		}
-
-		Sys_Printf('Setting up stream reader/writer...\n');
 		clientConn.bidirectionalStream = stream;
 		clientConn.reliableWriter = stream.writable.getWriter();
 		clientConn.reliableReader = stream.readable.getReader();
 
 		// In direct mode (room servers), skip lobby protocol entirely
-		if (directMode) {
-			Sys_Printf('Direct mode: accepting game connection from %s\n', address);
-		} else {
-			Sys_Printf('Stream ready, handling lobby protocol...\n');
-
+		if (!directMode) {
 			// Handle lobby protocol first
 			const isGameConnection = await _handleLobbyProtocol(clientConn, wt);
 			if (!isGameConnection) {
@@ -327,7 +309,7 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
 		// Create a socket for this game connection
 		const sock = _newQSocket();
 		if (!sock) {
-			Sys_Printf('No free sockets for new connection\n');
+			Sys_Printf('No free sockets for %s\n', address);
 			wt.close();
 			return;
 		}
@@ -341,15 +323,13 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
 		_startBackgroundReaders(sock, clientConn);
 
 		wt.closed.then(() => {
-			Sys_Printf('WebTransport closed: ' + address + '\n');
 			_handleConnectionDeath(sock, clientConn);
-		}).catch((error) => {
-			Sys_Printf('WebTransport error: ' + (error as Error).message + '\n');
+		}).catch(() => {
 			_handleConnectionDeath(sock, clientConn);
 		});
 
 	} catch (error) {
-		Sys_Printf('Error in WebTransport session: ' + (error as Error).message + '\n');
+		Sys_Printf('Session error for %s: %s\n', address, (error as Error).message);
 		try { wt.close(); } catch { /* ignore */ }
 	}
 }
@@ -359,13 +339,8 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
  */
 // deno-lint-ignore no-explicit-any
 async function _handleNewConnection(conn: any): Promise<void> {
-	Sys_Printf('Connection object keys: ' + Object.keys(conn).join(', ') + '\n');
-	Sys_Printf('Connection prototype: ' + Object.getPrototypeOf(conn)?.constructor?.name + '\n');
-
 	const remoteAddr = conn.remoteAddr;
 	const address = remoteAddr ? (remoteAddr.hostname + ':' + remoteAddr.port) : 'unknown';
-
-	Sys_Printf('New QUIC connection from ' + address + '\n');
 
 	try {
 		// Check if Deno.upgradeWebTransport exists
@@ -377,8 +352,6 @@ async function _handleNewConnection(conn: any): Promise<void> {
 			return;
 		}
 
-		Sys_Printf('Calling Deno.upgradeWebTransport...\n');
-
 		// Upgrade QUIC connection to WebTransport
 		// This handles the HTTP/3 CONNECT handshake automatically
 		// @ts-ignore - Deno.upgradeWebTransport is unstable
@@ -386,8 +359,6 @@ async function _handleNewConnection(conn: any): Promise<void> {
 
 		// Wait for WebTransport session to be ready
 		await wt.ready;
-
-		Sys_Printf('WebTransport session established with ' + address + '\n');
 
 		const clientConn: ClientConnection = {
 			id: nextConnectionId++,
@@ -472,25 +443,19 @@ async function _handleLobbyProtocol(
 	conn: ClientConnection,
 	wt: WebTransport
 ): Promise<boolean> {
-	Sys_Printf('_handleLobbyProtocol: starting\n');
 	if (!conn.reliableReader || !conn.reliableWriter) {
-		Sys_Printf('_handleLobbyProtocol: no reader/writer!\n');
 		return true;
 	}
 
 	try {
-		// Read first message with a short timeout
-		Sys_Printf('_handleLobbyProtocol: reading framed message...\n');
+		// Read first message
 		const msg = await _readFramedMessage(conn.reliableReader);
-		Sys_Printf('_handleLobbyProtocol: got message, type=' + (msg ? msg.type : 'null') + ', dataLen=' + (msg ? msg.data.length : 'null') + '\n');
 		if (!msg) {
-			Sys_Printf('_handleLobbyProtocol: null message, closing\n');
 			wt.close();
 			return false;
 		}
 
 		const msgType = msg.type;
-		Sys_Printf('_handleLobbyProtocol: msgType=' + msgType + '\n');
 
 		switch (msgType) {
 			case LOBBY_LIST: {
@@ -672,20 +637,17 @@ function _startBackgroundReaders(
 	// Read reliable messages
 	(async () => {
 		try {
-			Sys_Printf('Reliable reader started for %s\n', conn.address);
 			while (conn.connected && conn.reliableReader) {
 				const msg = await _readFramedMessage(conn.reliableReader);
 				if (!msg) break;
 
 				// Push just the data, not the frame type (game code expects raw message data)
-				Sys_Printf('Received reliable message: type=%d, %d bytes from %s\n', msg.type, msg.data.length, conn.address);
 				conn.pendingMessages.push({ reliable: true, data: msg.data });
 				conn.lastMessageTime = Date.now();
 			}
-			Sys_Printf('Reliable reader ended for %s\n', conn.address);
 		} catch (error) {
-			Sys_Printf('Reliable reader error for %s: %s\n', conn.address, String(error));
 			if (conn.connected) {
+				Sys_Printf('Reliable reader error for %s: %s\n', conn.address, String(error));
 				conn.connected = false;
 				sock.disconnected = true;
 			}
@@ -696,7 +658,6 @@ function _startBackgroundReaders(
 	(async () => {
 		try {
 			const reader = conn.webTransport.datagrams.readable.getReader();
-			Sys_Printf('Datagram reader started for %s\n', conn.address);
 			while (conn.connected) {
 				const { value, done } = await reader.read();
 				if (done) break;
@@ -704,8 +665,8 @@ function _startBackgroundReaders(
 				conn.lastMessageTime = Date.now();
 			}
 			reader.releaseLock();
-		} catch (error) {
-			Sys_Printf('Datagram reader error for %s: %s\n', conn.address, String(error));
+		} catch {
+			// Datagram reader ended - normal on disconnect
 		}
 	})();
 }
@@ -718,31 +679,25 @@ function _startBackgroundReaders(
 async function _readFramedMessage(
 	reader: ReadableStreamDefaultReader<Uint8Array>
 ): Promise<{ type: number; data: Uint8Array } | null> {
-	Sys_Printf('_readFramedMessage: reading 3-byte header...\n');
 	// Read header (3 bytes)
 	const header = await _readExact(reader, 3);
 	if (!header) {
-		Sys_Printf('_readFramedMessage: header read failed (null)\n');
 		return null;
 	}
 
 	const type = header[0];
 	const length = header[1] | (header[2] << 8);
-	Sys_Printf('_readFramedMessage: type=' + type + ', length=' + length + '\n');
 
 	if (length === 0) {
 		return { type, data: new Uint8Array(0) };
 	}
 
 	// Read message data
-	Sys_Printf('_readFramedMessage: reading ' + length + ' bytes of data...\n');
 	const data = await _readExact(reader, length);
 	if (!data) {
-		Sys_Printf('_readFramedMessage: data read failed (null)\n');
 		return null;
 	}
 
-	Sys_Printf('_readFramedMessage: got data, length=' + data.length + '\n');
 	return { type, data };
 }
 
@@ -886,14 +841,12 @@ function _handleConnectionDeath(sock: QSocket, conn: ClientConnection): void {
 		// Socket never made it to a client slot - clean up directly
 		pendingConnections.splice(pendingIdx, 1);
 		sock.disconnected = true;  // Only set for pending sockets
-		Sys_Printf('Removed dead socket from pending queue\n');
 
 		// Decrement player count if client was in a room
 		if (conn.roomId !== null) {
 			const room = getRoom(conn.roomId);
 			if (room !== undefined && room.playerCount > 0) {
 				updateRoomPlayerCount(conn.roomId, room.playerCount - 1);
-				Sys_Printf('Player left room %s (pending died), count now %d\n', conn.roomId, room.playerCount - 1);
 			}
 			conn.roomId = null;
 		}
@@ -901,7 +854,6 @@ function _handleConnectionDeath(sock: QSocket, conn: ClientConnection): void {
 		// Free the socket back to the pool (only for pending sockets)
 		if (_NET_FreeQSocket !== null) {
 			_NET_FreeQSocket(sock);
-			Sys_Printf('Pending socket freed back to pool\n');
 		}
 	}
 	// For sockets already assigned to clients:
@@ -1006,11 +958,8 @@ export function WT_QSendMessage(
 ): number {
 	const conn = sock.driverdata;
 	if (!conn || !conn.connected || !conn.reliableWriter) {
-		Sys_Printf('WT_QSendMessage: no connection/writer, returning -1\n');
 		return -1;
 	}
-
-	Sys_Printf('WT_QSendMessage: sending %d bytes to %s\n', data.cursize, conn.address);
 
 	// Frame the message
 	const frame = new Uint8Array(3 + data.cursize);
@@ -1019,14 +968,8 @@ export function WT_QSendMessage(
 	frame[2] = (data.cursize >> 8) & 0xff;
 	frame.set(data.data.subarray(0, data.cursize), 3);
 
-	// Log first few bytes for debugging
-	const preview = Array.from(data.data.subarray(0, Math.min(16, data.cursize))).map(b => b.toString(16).padStart(2, '0')).join(' ');
-	Sys_Printf('WT_QSendMessage: frame header [%d, %d, %d], data preview: %s\n', frame[0], frame[1], frame[2], preview);
-
 	// Send asynchronously
-	conn.reliableWriter.write(frame).then(() => {
-		Sys_Printf('WT_QSendMessage: write completed successfully\n');
-	}).catch((err) => {
+	conn.reliableWriter.write(frame).catch((err) => {
 		Sys_Printf('WT_QSendMessage: write FAILED: %s\n', (err as Error).message);
 		conn.connected = false;
 		sock.disconnected = true;
@@ -1038,7 +981,6 @@ export function WT_QSendMessage(
 /**
  * Send an unreliable message via datagrams
  */
-let _lastSendLogTime = 0;
 export function WT_SendUnreliableMessage(
 	sock: QSocket,
 	data: { data: Uint8Array; cursize: number }
@@ -1050,17 +992,10 @@ export function WT_SendUnreliableMessage(
 	const dgram = new Uint8Array(data.cursize);
 	dgram.set(data.data.subarray(0, data.cursize));
 
-	// Debug: log sending datagram (rate limited)
-	const now = Date.now();
-	if (now - _lastSendLogTime > 1000) {
-		Sys_Printf('WT_SendUnreliableMessage: sending %d bytes to %s, cmd=%d\n', data.cursize, conn.address, dgram[0]);
-		_lastSendLogTime = now;
-	}
-
 	// Send via datagram
 	const writer = conn.webTransport.datagrams.writable.getWriter();
-	writer.write(dgram).catch((error) => {
-		Sys_Printf('WT_SendUnreliableMessage: write failed: %s\n', String(error));
+	writer.write(dgram).catch(() => {
+		// Silently fail - datagrams are unreliable by design
 	}).finally(() => {
 		writer.releaseLock();
 	});
