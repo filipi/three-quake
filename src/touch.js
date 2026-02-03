@@ -11,6 +11,7 @@ let initialized = false;
 let menuOverlay = null;
 let menuTouchCallback = null;
 let fullscreenActivated = false;
+let wakeLock = null;
 
 // Movement joystick (left side)
 let moveTouch = null;
@@ -33,6 +34,8 @@ let jumpImpulse = false;
 // Gyroscope state
 let gyroEnabled = false;
 let gyroPermissionRequested = false;
+let prevBeta = null;
+let prevGamma = null;
 const GYRO_SENSITIVITY = 2.0;
 
 // UI elements
@@ -451,28 +454,41 @@ function onTouchEnd( e ) {
 =================
 Gyroscope support
 
-Uses devicemotion (rotationRate) instead of deviceorientation because
-rotationRate gives angular velocity directly from the gyroscope without
-depending on the magnetometer. More reliable for aiming.
+Uses deviceorientation with delta tracking. In landscape mode:
+- gamma (-90 to 90) changes when tilting left/right = yaw
+- beta (-180 to 180) changes when tilting up/down = pitch
 =================
 */
 
-function onDeviceMotion( e ) {
+function onDeviceOrientation( e ) {
 
 	if ( ! enabled ) return;
 
-	const rate = e.rotationRate;
-	if ( rate === null ) return;
+	const beta = e.beta;   // X-axis tilt: -180 to 180
+	const gamma = e.gamma; // Y-axis tilt: -90 to 90
 
-	// rotationRate gives degrees per second
-	// Convert to per-frame delta using the sample interval
-	const dt = ( e.interval || 16 ) / 1000;
+	if ( beta === null || gamma === null ) return;
 
-	// In landscape, device axes are rotated 90 degrees from portrait:
-	// - rate.gamma (portrait Y-axis) is now vertical = yaw (looking left/right)
-	// - rate.beta (portrait X-axis) is now horizontal = pitch (looking up/down)
-	if ( rate.gamma !== null ) lookDeltaX -= rate.gamma * dt * GYRO_SENSITIVITY;
-	if ( rate.beta !== null ) lookDeltaY += rate.beta * dt * GYRO_SENSITIVITY;
+	if ( prevBeta !== null && prevGamma !== null ) {
+
+		// Delta for beta with wraparound (-180 to 180)
+		let dBeta = beta - prevBeta;
+		if ( dBeta > 180 ) dBeta -= 360;
+		if ( dBeta < - 180 ) dBeta += 360;
+
+		// Delta for gamma (no wraparound needed, range is -90 to 90)
+		let dGamma = gamma - prevGamma;
+
+		// In landscape mode:
+		// - tilting phone left/right changes gamma = yaw
+		// - tilting phone up/down changes beta = pitch
+		lookDeltaX += dGamma * GYRO_SENSITIVITY;
+		lookDeltaY -= dBeta * GYRO_SENSITIVITY;
+
+	}
+
+	prevBeta = beta;
+	prevGamma = gamma;
 
 }
 
@@ -482,12 +498,12 @@ async function Gyro_RequestPermission() {
 	gyroPermissionRequested = true;
 
 	// iOS 13+ requires explicit permission request from a user gesture
-	if ( typeof DeviceMotionEvent !== 'undefined' &&
-		typeof DeviceMotionEvent.requestPermission === 'function' ) {
+	if ( typeof DeviceOrientationEvent !== 'undefined' &&
+		typeof DeviceOrientationEvent.requestPermission === 'function' ) {
 
 		try {
 
-			const permission = await DeviceMotionEvent.requestPermission();
+			const permission = await DeviceOrientationEvent.requestPermission();
 			if ( permission === 'granted' ) {
 
 				Gyro_Enable();
@@ -517,7 +533,9 @@ function Gyro_Enable() {
 
 	if ( gyroEnabled ) return;
 	gyroEnabled = true;
-	window.addEventListener( 'devicemotion', onDeviceMotion );
+	prevBeta = null;
+	prevGamma = null;
+	window.addEventListener( 'deviceorientation', onDeviceOrientation );
 	console.log( 'Gyroscope aiming enabled' );
 
 }
@@ -526,7 +544,53 @@ function Gyro_Disable() {
 
 	if ( ! gyroEnabled ) return;
 	gyroEnabled = false;
-	window.removeEventListener( 'devicemotion', onDeviceMotion );
+	prevBeta = null;
+	prevGamma = null;
+	window.removeEventListener( 'deviceorientation', onDeviceOrientation );
+
+}
+
+/*
+=================
+Wake Lock - prevents screen from dimming while playing
+=================
+*/
+
+async function Touch_RequestWakeLock() {
+
+	if ( wakeLock !== null ) return;
+
+	if ( 'wakeLock' in navigator ) {
+
+		try {
+
+			wakeLock = await navigator.wakeLock.request( 'screen' );
+			console.log( 'Wake Lock acquired' );
+
+			wakeLock.addEventListener( 'release', () => {
+
+				wakeLock = null;
+
+			} );
+
+		} catch ( err ) {
+
+			console.log( 'Wake Lock request failed:', err.message );
+
+		}
+
+	}
+
+}
+
+function Touch_ReleaseWakeLock() {
+
+	if ( wakeLock !== null ) {
+
+		wakeLock.release();
+		wakeLock = null;
+
+	}
 
 }
 
@@ -698,6 +762,9 @@ export function Touch_Enable() {
 
 	}
 
+	// Keep screen on while playing
+	Touch_RequestWakeLock();
+
 }
 
 /*
@@ -737,6 +804,9 @@ export function Touch_Disable() {
 
 	// Disable gyroscope while controls are off
 	Gyro_Disable();
+
+	// Release wake lock when not playing
+	Touch_ReleaseWakeLock();
 
 	// Reset state
 	moveTouch = null;

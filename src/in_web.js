@@ -100,9 +100,6 @@ let targetElement = null;
 // Mobile/touch state
 let isMobile = false;
 
-// Wake Lock state (prevents screen from dimming/locking while playing)
-let wakeLock = null;
-
 // cvars (matching in_win.c)
 const m_filter = { name: 'm_filter', string: '0', value: 0 };
 const sensitivity = { name: 'sensitivity', string: '3', value: 3 };
@@ -180,7 +177,6 @@ function handleKeyDown( event ) {
 
 			Touch_Enable();
 			mouseactive = true;
-			requestWakeLock(); // Keep screen on while playing
 
 		} else if ( ! pointerLocked && targetElement && ! Touch_IsMobile() ) {
 
@@ -282,7 +278,6 @@ function handleMouseDown( event ) {
 
 			Touch_Enable();
 			mouseactive = true;
-			requestWakeLock(); // Keep screen on while playing
 
 		}
 
@@ -345,7 +340,6 @@ function handlePointerLockChange() {
 	if ( pointerLocked ) {
 
 		mouseactive = true;
-		requestWakeLock(); // Keep screen on while playing
 
 	} else {
 
@@ -361,13 +355,6 @@ function handlePointerLockChange() {
 
 		}
 
-		// Release wake lock when not actively playing (desktop)
-		if ( ! isMobile ) {
-
-			releaseWakeLock();
-
-		}
-
 	}
 
 }
@@ -378,64 +365,9 @@ function handleContextMenu( event ) {
 
 }
 
-/*
-===========================================================================
-
-			WAKE LOCK API
-
-Prevents the screen from dimming or locking while the game is active.
-===========================================================================
-*/
-
-async function requestWakeLock() {
-
-	if ( wakeLock !== null ) return; // Already have a lock
-
-	if ( 'wakeLock' in navigator ) {
-
-		try {
-
-			wakeLock = await navigator.wakeLock.request( 'screen' );
-			Con_Printf( 'Wake Lock acquired - screen will stay on\n' );
-
-			// Listen for the wake lock being released (e.g., tab becomes hidden)
-			wakeLock.addEventListener( 'release', () => {
-
-				wakeLock = null;
-
-			} );
-
-		} catch ( err ) {
-
-			// Wake lock request can fail (e.g., low battery, permission denied)
-			Con_Printf( 'Wake Lock request failed: ' + err.message + '\n' );
-
-		}
-
-	}
-
-}
-
-function releaseWakeLock() {
-
-	if ( wakeLock !== null ) {
-
-		wakeLock.release();
-		wakeLock = null;
-		Con_Printf( 'Wake Lock released\n' );
-
-	}
-
-}
-
 function handleVisibilityChange() {
 
-	// Re-acquire wake lock when tab becomes visible again (if we're in-game)
-	if ( document.visibilityState === 'visible' && ( pointerLocked || ( isMobile && Touch_IsEnabled() ) ) ) {
-
-		requestWakeLock();
-
-	}
+	// Placeholder for visibility change handling (wake lock is in touch.js for mobile)
 
 }
 
@@ -553,9 +485,6 @@ export function IN_Shutdown() {
 		document.exitPointerLock();
 
 	}
-
-	// Release wake lock on shutdown
-	releaseWakeLock();
 
 	mouseactive = false;
 	mouseinitialized = false;
