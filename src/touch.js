@@ -329,13 +329,13 @@ function onTouchStart( e ) {
 
 			in_attack.state |= 1 + 2; // down + impulse down
 			fireButton.style.background = 'rgba(255, 100, 100, 0.5)';
-			if ( typeof navigator.vibrate === 'function' ) navigator.vibrate( 50 );
+			if ( typeof navigator.vibrate === 'function' ) navigator.vibrate( 100 );
 
 		} else if ( target === jumpButton ) {
 
 			in_jump.state |= 1 + 2; // down + impulse down
 			jumpButton.style.background = 'rgba(100, 150, 255, 0.5)';
-			if ( typeof navigator.vibrate === 'function' ) navigator.vibrate( 50 );
+			if ( typeof navigator.vibrate === 'function' ) navigator.vibrate( 100 );
 
 		} else if ( target === pauseButton ) {
 
@@ -479,11 +479,37 @@ function onDeviceOrientation( e ) {
 		// Delta for gamma (no wraparound needed, range is -90 to 90)
 		let dGamma = gamma - prevGamma;
 
-		// Android adjusts beta/gamma for screen orientation automatically:
-		// - gamma = tilt left/right = yaw
-		// - beta = tilt forward/back = pitch
-		lookDeltaX -= dGamma * GYRO_SENSITIVITY;
-		lookDeltaY += dBeta * GYRO_SENSITIVITY;
+		// deviceorientation reports values relative to the device's physical
+		// axes, NOT the screen orientation. We must check the actual screen
+		// angle and remap accordingly.
+		const angle = ( screen.orientation && screen.orientation.angle !== undefined )
+			? screen.orientation.angle
+			: ( window.orientation || 0 );
+
+		let dYaw, dPitch;
+
+		if ( angle === 90 ) {
+
+			// Landscape: top of phone is on the left
+			dYaw = dBeta;
+			dPitch = - dGamma;
+
+		} else if ( angle === - 90 || angle === 270 ) {
+
+			// Landscape: top of phone is on the right
+			dYaw = - dBeta;
+			dPitch = dGamma;
+
+		} else {
+
+			// Portrait (0) or upside-down (180)
+			dYaw = dGamma;
+			dPitch = dBeta;
+
+		}
+
+		lookDeltaX += dYaw * GYRO_SENSITIVITY;
+		lookDeltaY += dPitch * GYRO_SENSITIVITY;
 
 	}
 
