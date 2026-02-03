@@ -479,11 +479,11 @@ function onDeviceOrientation( e ) {
 		// Delta for gamma (no wraparound needed, range is -90 to 90)
 		let dGamma = gamma - prevGamma;
 
-		// In fullscreen landscape, device axes are swapped:
-		// - tilting phone up/down changes gamma = yaw
-		// - tilting phone left/right changes beta = pitch
-		lookDeltaX += dBeta * GYRO_SENSITIVITY;
-		lookDeltaY -= dGamma * GYRO_SENSITIVITY;
+		// Android adjusts beta/gamma for screen orientation automatically:
+		// - gamma = tilt left/right = yaw
+		// - beta = tilt forward/back = pitch
+		lookDeltaX -= dGamma * GYRO_SENSITIVITY;
+		lookDeltaY += dBeta * GYRO_SENSITIVITY;
 
 	}
 
