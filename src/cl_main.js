@@ -33,6 +33,7 @@ import { S_StopAllSounds } from './snd_dma.js';
 import { M_ConnectionError, M_ShouldReturnOnError } from './menu.js';
 import { key_menu, set_key_dest } from './keys.js';
 import { CL_InitPrediction, CL_ResetPrediction, CL_PredictMove,
+	CL_GetPredictedPlayer, CL_SetUpPlayerPrediction,
 	cl_simorg, cl_simvel, cl_simangles, cl_nopred } from './cl_pred.js';
 
 // Re-export prediction state for view.js to use
@@ -628,6 +629,13 @@ export function CL_RelinkEntities() {
 
 	const bobjrotate = anglemod( 100 * cl.time );
 
+	// Calculate predicted positions for other players (for smoother rendering)
+	// Only do this when not in demo playback and prediction is enabled
+	const usePredictedPlayers = ! cls.demoplayback && ! sv.active && cl_nopred.value === 0;
+	if ( usePredictedPlayers ) {
+		CL_SetUpPlayerPrediction( true );
+	}
+
 	// start on the entity after the world
 	for ( let i = 1; i < cl.num_entities; i ++ ) {
 
@@ -690,6 +698,15 @@ export function CL_RelinkEntities() {
 
 			}
 
+		}
+
+		// Use predicted position for other players (smoother multiplayer rendering)
+		// This overrides the server-interpolated position with our predicted position
+		if ( usePredictedPlayers && i <= cl.maxclients && i !== cl.viewentity ) {
+			const pplayer = CL_GetPredictedPlayer( i );
+			if ( pplayer != null ) {
+				VectorCopy( pplayer.origin, ent.origin );
+			}
 		}
 
 		// rotate binary objects locally

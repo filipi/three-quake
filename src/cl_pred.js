@@ -286,6 +286,55 @@ export function CL_SetUpPlayerPrediction( dopred ) {
 
 /*
 =================
+CL_SetSolidEntities
+
+Add brush entities (doors, platforms, lifts) as collision objects for prediction.
+Ported from QuakeWorld cl_ents.c
+=================
+*/
+function CL_SetSolidEntities() {
+	// Start after world model (physent 0)
+	// Iterate through all entities and add brush models with collision hulls
+	for ( let i = 1; i < cl.num_entities; i++ ) {
+		const ent = cl_entities[ i ];
+
+		// Skip entities without models
+		if ( ent.model == null )
+			continue;
+
+		// Skip if not a brush model (type 0 = mod_brush)
+		if ( ent.model.type !== 0 )
+			continue;
+
+		// Check if model has collision hull data (hulls[1] for player-sized collision)
+		// Brush models with collision have firstclipnode set to a valid node index
+		const hull = ent.model.hulls[ 1 ];
+		if ( hull == null )
+			continue;
+
+		// QuakeWorld checks: hulls[1].firstclipnode || clipbox
+		// For brush submodels, firstclipnode will be set to the headnode
+		// A value of 0 with lastclipnode also 0 means no collision data
+		if ( hull.firstclipnode === 0 && hull.lastclipnode === 0 && hull.clipnodes == null )
+			continue;
+
+		// Add this brush entity as a physics collision object
+		if ( pmove.numphysent >= pmove.physents.length )
+			break;
+
+		const pent = pmove.physents[ pmove.numphysent ];
+		pent.model = ent.model;
+		pent.origin[ 0 ] = ent.origin[ 0 ];
+		pent.origin[ 1 ] = ent.origin[ 1 ];
+		pent.origin[ 2 ] = ent.origin[ 2 ];
+		pent.info = i;
+
+		pmove.numphysent++;
+	}
+}
+
+/*
+=================
 CL_SetupPMove
 
 Set up pmove state for prediction
@@ -300,6 +349,9 @@ function CL_SetupPMove() {
 		pmove.physents[ 0 ].origin.fill( 0 );
 		pmove.numphysent = 1;
 	}
+
+	// Add brush entities (doors, platforms) as collision objects
+	CL_SetSolidEntities();
 
 	// Calculate predicted positions for other players first
 	CL_SetUpPlayerPrediction( true );

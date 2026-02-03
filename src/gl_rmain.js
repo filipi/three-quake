@@ -580,8 +580,17 @@ export function R_DrawViewModel() {
 	if ( ! currententity || ! currententity.model )
 		return;
 
+	// hack the depth range to prevent view model from poking into walls
+	// Original Quake used glDepthRange(0, 0.3) to compress weapon depth values
+	// into the first 30% of the depth buffer, making it always appear in front
+	const gl = renderer.getContext();
+	gl.depthRange( 0, 0.3 );
+
 	// Draw the viewmodel
 	R_DrawAliasModel( currententity );
+
+	// Restore normal depth range
+	gl.depthRange( 0, 1 );
 
 }
 
