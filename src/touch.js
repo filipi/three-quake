@@ -33,7 +33,7 @@ let jumpImpulse = false;
 // Gyroscope state
 let gyroEnabled = false;
 let gyroPermissionRequested = false;
-const GYRO_SENSITIVITY = 1.0;
+const GYRO_SENSITIVITY = 2.0;
 
 // UI elements
 let overlay = null;
@@ -469,10 +469,10 @@ function onDeviceMotion( e ) {
 	const dt = ( e.interval || 16 ) / 1000;
 
 	// In landscape, device axes are rotated 90 degrees from portrait:
-	// - rate.beta (portrait X-axis) is now vertical = yaw (looking left/right)
-	// - rate.gamma (portrait Y-axis) is now horizontal = pitch (looking up/down)
-	if ( rate.beta !== null ) lookDeltaX += rate.beta * dt * GYRO_SENSITIVITY;
-	if ( rate.gamma !== null ) lookDeltaY -= rate.gamma * dt * GYRO_SENSITIVITY;
+	// - rate.gamma (portrait Y-axis) is now vertical = yaw (looking left/right)
+	// - rate.beta (portrait X-axis) is now horizontal = pitch (looking up/down)
+	if ( rate.gamma !== null ) lookDeltaX -= rate.gamma * dt * GYRO_SENSITIVITY;
+	if ( rate.beta !== null ) lookDeltaY += rate.beta * dt * GYRO_SENSITIVITY;
 
 }
 
