@@ -1,6 +1,5 @@
 // Ported from: WinQuake/sv_move.c -- monster movement
 
-import { Con_Printf, Con_DPrintf } from './common.js';
 import { vec3_origin, DotProduct, VectorCopy, VectorAdd, VectorSubtract,
 	VectorNormalize, M_PI, anglemod } from './mathlib.js';
 import { YAW } from './quakedef.js';

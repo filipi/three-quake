@@ -2,8 +2,6 @@
 
 import * as THREE from 'three';
 import { Sys_Error } from './sys.js';
-import { Con_Printf, Con_DPrintf, COM_CheckParm } from './common.js';
-import { vid } from './vid.js';
 
 function createQuakeLightmapMaterial( diffuseMap, lightmapTex ) {
 

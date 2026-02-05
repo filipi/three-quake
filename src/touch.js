@@ -1,8 +1,8 @@
 // Touch controls for mobile devices
 // Provides virtual joystick on left, look area on right with tap-to-jump
 
-import { K_ESCAPE, K_ENTER, K_UPARROW, K_DOWNARROW, Key_Event, key_game, key_menu, key_dest } from './keys.js';
-import { in_jump, in_attack } from './cl_input.js';
+import { K_ESCAPE, Key_Event } from './keys.js';
+import { in_attack, in_jump } from './cl_input.js';
 import { S_UnlockAudio } from './snd_dma.js';
 
 // Touch state

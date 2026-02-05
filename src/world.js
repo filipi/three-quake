@@ -9,7 +9,7 @@ line of sight checks trace->crosscontent, but bullets don't
 */
 
 import { Sys_Error } from './sys.js';
-import { Con_Printf, Con_DPrintf, link_t, ClearLink, RemoveLink, InsertLinkBefore } from './common.js';
+import { Con_DPrintf, link_t, ClearLink, RemoveLink, InsertLinkBefore } from './common.js';
 import { VectorCopy, VectorAdd, VectorSubtract, DotProduct, vec3_origin, BoxOnPlaneSide } from './mathlib.js';
 import {
 	sv, svs,

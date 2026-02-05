@@ -2,7 +2,6 @@
 
 import * as THREE from 'three';
 import { Sys_Error } from './sys.js';
-import { Con_Printf } from './common.js';
 import { DotProduct, VectorCopy, VectorAdd, VectorSubtract, M_PI,
 	vec3_origin } from './mathlib.js';
 import { VERTEXSIZE, glpoly_t, gl_subdivide_size, r_origin,

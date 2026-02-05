@@ -5,9 +5,8 @@
 // Production: deno run --allow-net --allow-read --unstable-net --config /opt/three-quake/deno.json /opt/three-quake/server/game_server.js
 
 import { Sys_Printf, Sys_FloatTime } from '../src/sys.js';
-import { COM_InitArgv } from '../src/common.js';
 import { COM_FetchPak, COM_AddPack, COM_PreloadMaps } from '../src/pak.js';
-import { Cbuf_Init, Cbuf_Execute, Cbuf_AddText, Cmd_Init } from '../src/cmd.js';
+import { Cbuf_Init, Cbuf_Execute, Cmd_Init } from '../src/cmd.js';
 import { Host_InitCommands } from '../src/host.js';
 import { deathmatch, samelevel, noexit, sys_ticrate } from '../src/host.js';
 import { cls, ca_dedicated } from '../src/client.js';

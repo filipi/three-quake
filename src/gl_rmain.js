@@ -2,8 +2,8 @@
 // + WinQuake/glquake.h -- GL definitions
 
 import * as THREE from 'three';
-import { Sys_Error, Sys_FloatTime } from './sys.js';
-import { Con_Printf, Con_DPrintf, COM_CheckParm } from './common.js';
+import { Sys_FloatTime } from './sys.js';
+import { Con_Printf } from './common.js';
 import { PITCH, YAW, ROLL } from './quakedef.js';
 import { cvar_t } from './cvar.js';
 import { vid, renderer } from './vid.js';
@@ -13,7 +13,7 @@ import {
 	VectorNormalize, AngleVectors, Length, RotatePointAroundVector, BoxOnPlaneSide
 } from './mathlib.js';
 import { R_DrawWorld as R_DrawWorld_impl, R_MarkLeaves as R_MarkLeaves_impl, GL_BuildLightmaps as GL_BuildLightmaps_rsurf, R_DrawBrushModel as R_DrawBrushModel_rsurf, R_DrawWaterSurfaces as R_DrawWaterSurfaces_rsurf, R_CleanupWaterMeshes as R_CleanupWaterMeshes_rsurf } from './gl_rsurf.js';
-import { Mod_PointInLeaf, Mod_LeafPVS, Mod_Extradata } from './gl_model.js';
+import { Mod_PointInLeaf } from './gl_model.js';
 import { R_AnimateLight as R_AnimateLight_impl, R_PushDlights as R_PushDlights_impl, R_RenderDlights as R_RenderDlights_impl, R_LightPoint } from './gl_rlight.js';
 import { R_DrawAliasModel as R_DrawAliasModel_mesh } from './gl_mesh.js';
 import { r_avertexnormal_dots } from './anorm_dots.js';

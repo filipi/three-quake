@@ -17,7 +17,7 @@ import { Cmd_AddCommand } from './cmd.js';
 import { Con_Printf } from './console.js';
 import { cl, cls, ca_connected } from './client.js';
 import { m_pitch, m_yaw, m_forward, m_side, lookstrafe } from './cl_main.js';
-import { in_mlook, in_strafe, in_jump, cl_forwardspeed, cl_sidespeed } from './cl_input.js';
+import { in_mlook, in_strafe, cl_forwardspeed, cl_sidespeed } from './cl_input.js';
 import { V_StopPitchDrift } from './view.js';
 import { PITCH, YAW } from './quakedef.js';
 import {

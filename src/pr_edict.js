@@ -5,7 +5,6 @@ import { Con_Printf, Con_DPrintf, COM_Parse, com_token } from './common.js';
 import { Cmd_AddCommand, Cmd_Argv } from './cmd.js';
 import { PR_InitBuiltins } from './pr_cmds.js';
 import { CRC_Init, CRC_ProcessByte, CRC_Value } from './crc.js';
-import { VectorCopy, vec3_origin } from './mathlib.js';
 import { MAX_EDICTS } from './quakedef.js';
 import {
 	dprograms_t, dfunction_t, ddef_t, dstatement_t,

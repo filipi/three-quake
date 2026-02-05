@@ -1,12 +1,12 @@
 // Ported from: QuakeWorld/client/cl_pred.c
 // Client-side prediction for smooth movement with low server tick rates
 
-import { VectorCopy, VectorSubtract, VectorMA } from './mathlib.js';
+import { VectorCopy } from './mathlib.js';
 import { cvar_t, Cvar_RegisterVariable } from './cvar.js';
 import { pmove, movevars, PlayerMove, PM_HullPointContents, PM_GetOnGround, Pmove_Init,
 	player_mins, player_maxs } from './pmove.js';
 import { CONTENTS_EMPTY } from './bspfile.js';
-import { cl, cls, ca_connected, cl_entities, packet_entities_t } from './client.js';
+import { cl, cl_entities, packet_entities_t } from './client.js';
 import { STAT_HEALTH } from './quakedef.js';
 import { realtime, sv } from './host.js';
 

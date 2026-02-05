@@ -1,7 +1,7 @@
 // Ported from: WinQuake/vid.h -- video driver defs (browser/Three.js)
 
 import * as THREE from 'three';
-import { Sys_Error, Sys_Printf } from './sys.js';
+import { Sys_Printf } from './sys.js';
 import { Con_Printf } from './console.js';
 
 //

@@ -5,7 +5,6 @@ import { MAX_MODELS, MAX_SOUNDS, MAX_EDICTS, MAX_LIGHTSTYLES,
 	STAT_HEALTH, STAT_FRAGS, STAT_WEAPON, STAT_AMMO, STAT_ARMOR,
 	STAT_WEAPONFRAME, STAT_SHELLS, STAT_ACTIVEWEAPON, STAT_MONSTERS,
 	STAT_SECRETS, entity_state_t } from './quakedef.js';
-import { PITCH, YAW, ROLL } from './quakedef.js';
 import { Con_Printf, Con_DPrintf, SZ_Clear,
 	MSG_BeginReading, MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadLong,
 	MSG_ReadFloat, MSG_ReadString, MSG_ReadCoord, MSG_ReadAngle,
@@ -15,9 +14,8 @@ import { Con_Printf, Con_DPrintf, SZ_Clear,
 	net_message, standard_quake } from './common.js';
 import { Sys_Error, Sys_FloatTime } from './sys.js';
 import { Cbuf_AddText } from './cmd.js';
-import { Cmd_ExecuteString, Cmd_Argv } from './cmd.js';
+import { Cmd_ExecuteString } from './cmd.js';
 import { src_command } from './cmd.js';
-import { Cvar_Set } from './cvar.js';
 import {
 	PROTOCOL_VERSION,
 	svc_bad, svc_nop, svc_disconnect, svc_updatestat, svc_version,
@@ -67,7 +65,7 @@ import { R_TranslatePlayerSkin } from './gl_rmisc.js';
 export let cl_playerindex = -1;
 import { R_NewMap } from './gl_rmisc.js';
 import { R_ParseParticleEffect, R_AddEfrags } from './render.js';
-import { Host_Error, Host_EndGame, host_framecount, realtime, set_noclip_anglehack } from './host.js';
+import { Host_Error, Host_EndGame, realtime, set_noclip_anglehack } from './host.js';
 import { CL_SignonReply, CL_ClearState, cl_shownet } from './cl_main.js';
 import { CL_ParseTEnt } from './cl_tent.js';
 import { S_PrecacheSound, S_StartSound, S_StopSound, S_StaticSound } from './snd_dma.js';

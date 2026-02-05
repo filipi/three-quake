@@ -1,7 +1,6 @@
 // Ported from: WinQuake/gl_rmisc.c -- GL misc rendering functions
 
 import * as THREE from 'three';
-import { Sys_FloatTime } from './sys.js';
 import { Con_Printf } from './common.js';
 import { Cvar_RegisterVariable as Cvar_RegisterVariable_impl, Cvar_SetValue as Cvar_SetValue_impl } from './cvar.js';
 import { d_lightstylevalue, r_viewleaf, r_norefresh, r_lightmap,

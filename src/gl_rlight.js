@@ -1,11 +1,11 @@
 // Ported from: WinQuake/gl_rlight.c -- dynamic lighting
 
 import * as THREE from 'three';
-import { DotProduct, VectorCopy, VectorSubtract, Length, M_PI } from './mathlib.js';
+import { DotProduct, VectorCopy, VectorSubtract, Length } from './mathlib.js';
 import { MAX_LIGHTSTYLES } from './quakedef.js';
 import { MAXLIGHTMAPS, d_lightstylevalue, r_framecount,
 	gl_flashblend, v_blend } from './glquake.js';
-import { r_origin, vpn, vright, vup } from './render.js';
+import { r_origin } from './render.js';
 import { cl_dlights } from './client.js';
 
 export const MAX_DLIGHTS = 32;

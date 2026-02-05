@@ -57,7 +57,7 @@ import {
 	NET_CanSendMessage, NET_SendToAll, NET_Close, NET_GetMessage
 } from './net_main.js';
 import { net_activeconnections, set_net_activeconnections } from './net.js';
-import { realtime, Host_ClearMemory } from './host.js';
+import { realtime, Host_ClearMemory, set_host_frametime } from './host.js';
 import { COM_LoadFile } from './pak.js';
 import { VectorCopy, VectorAdd, DotProduct } from './mathlib.js';
 import { Mod_ForName, Mod_LeafPVS } from './gl_model.js';

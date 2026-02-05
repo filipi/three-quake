@@ -1,7 +1,7 @@
 // Ported from: WinQuake/r_part.c -- particle system
 
 import * as THREE from 'three';
-import { VectorCopy, VectorSubtract, VectorNormalize, VectorAdd, vec3_origin } from './mathlib.js';
+import { VectorCopy, VectorSubtract, VectorNormalize } from './mathlib.js';
 import { r_avertexnormals } from './anorm_dots.js';
 import { d_8to24table } from './vid.js';
 import { cl as client_cl } from './client.js';

@@ -4,7 +4,7 @@
 
 import { vec3_origin, DotProduct, VectorCopy, VectorAdd, VectorSubtract,
 	VectorMA, VectorScale, VectorNormalize, Length, AngleVectors, CrossProduct } from './mathlib.js';
-import { CONTENTS_EMPTY, CONTENTS_SOLID, CONTENTS_WATER, CONTENTS_SLIME, CONTENTS_LAVA } from './bspfile.js';
+import { CONTENTS_EMPTY, CONTENTS_SOLID, CONTENTS_WATER, CONTENTS_SLIME } from './bspfile.js';
 
 // Movement constants
 const STEPSIZE = 18;

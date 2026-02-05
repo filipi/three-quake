@@ -6,7 +6,6 @@
 
 import { Sys_Error } from './sys.js';
 import { Con_Printf, Con_DPrintf } from './common.js';
-import { Cmd_AddCommand } from './cmd.js';
 
 /*
 Memory layout in original Quake (for reference):

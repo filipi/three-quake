@@ -1,6 +1,5 @@
 // Ported from: WinQuake/pr_cmds.c -- QuakeC built-in functions
 
-import { Sys_Error } from './sys.js';
 import {
 	Con_Printf, Con_DPrintf,
 	MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong,
@@ -32,7 +31,7 @@ import {
 	ED_Alloc, ED_Free, ED_Print, ED_PrintNum, ED_PrintEdicts,
 	ED_FindFunction, ED_FindField,
 } from './pr_edict.js';
-import { PR_ExecuteProgram, PR_RunError } from './pr_exec.js';
+import { PR_RunError } from './pr_exec.js';
 import { SV_Move, SV_LinkEdict, SV_PointContents } from './world.js';
 import { SV_movestep, SV_CheckBottom, SV_MoveToGoal as SV_MoveToGoal_Real, SV_Move_SetCallbacks } from './sv_move.js';
 import { SV_StartSound, SV_StartParticle } from './sv_main.js';

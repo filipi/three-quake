@@ -5,7 +5,7 @@ import { Con_Printf, Con_DPrintf } from './common.js';
 import { vec3_origin, DotProduct, VectorCopy, VectorAdd, VectorSubtract, VectorMA,
 	VectorScale, VectorCompare, VectorNormalize, CrossProduct, Length, AngleVectors,
 	M_PI, anglemod } from './mathlib.js';
-import { ON_EPSILON, MAX_EDICTS, PITCH, YAW, ROLL } from './quakedef.js';
+import { MAX_EDICTS, YAW } from './quakedef.js';
 import { PR_GetString } from './progs.js';
 import { trace_t } from './world.js';
 

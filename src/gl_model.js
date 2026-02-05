@@ -6,10 +6,9 @@
 
 import * as THREE from 'three';
 import { Sys_Error } from './sys.js';
-import { Con_Printf, Con_DPrintf, COM_FileBase } from './common.js';
+import { Con_Printf, COM_FileBase } from './common.js';
 import { d_8to24table } from './vid.js';
 import { COM_LoadFile } from './pak.js';
-import { CRC_Init, CRC_ProcessByte, CRC_Value } from './crc.js';
 import { DotProduct, VectorCopy, Length } from './mathlib.js';
 import { R_InitSky as R_InitSky_warp, GL_SubdivideSurface as GL_SubdivideSurface_warp, GL_Warp_SetLoadmodel } from './gl_warp.js';
 import { GL_MakeAliasModelDisplayLists as GL_MakeAliasModelDisplayLists_mesh } from './gl_mesh.js';
@@ -28,7 +27,6 @@ import {
 	MIPLEVELS, MAXLIGHTMAPS, NUM_AMBIENTS,
 	TEX_SPECIAL
 } from './bspfile.js';
-import { MAX_QPATH } from './quakedef.js';
 import { gl_texturemode, GL_RegisterTexture } from './glquake.js';
 
 // ============================================================================

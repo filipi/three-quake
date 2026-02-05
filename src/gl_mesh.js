@@ -2,8 +2,6 @@
 
 import * as THREE from 'three';
 import { Con_Printf, Con_DPrintf } from './common.js';
-import { Sys_Error } from './sys.js';
-import { MAX_QPATH, MAX_OSPATH } from './quakedef.js';
 import { cl } from './client.js';
 import { R_GetPlayerSkinTexture } from './gl_rmisc.js';
 import { gl_nocolors } from './glquake.js';

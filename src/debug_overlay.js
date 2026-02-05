@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { CSS3DRenderer, CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from './cmd.js';
 import { Con_Printf } from './common.js';
-import { cl, cl_entities, cl_visedicts, cl_numvisedicts } from './client.js';
+import { cl, cl_entities } from './client.js';
 import { mod_brush } from './gl_rmain.js';
 import { sv } from './server.js';
 import { PR_GetString } from './progs.js';

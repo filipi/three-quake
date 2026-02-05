@@ -3,7 +3,6 @@
 import { Cvar_RegisterVariable } from './cvar.js';
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from './cmd.js';
 import { Con_Printf, Con_DPrintf } from './console.js';
-import { COM_FindFile } from './pak.js';
 import {
 	sfx_t, sfxcache_t, channel_t, dma_t,
 	channels, MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, NUM_AMBIENTS,

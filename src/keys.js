@@ -5,7 +5,7 @@ import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv, Cmd_CompleteCommand } from './cmd.j
 import { Cvar_CompleteVariable } from './cvar.js';
 import { Con_Printf, con_forcedup, con_backscroll, Con_SetBackscroll, con_totallines } from './console.js';
 import { M_Keydown, M_ToggleMenu_f } from './menu.js';
-import { SCR_UpdateScreen, SCR_EndLoadingPlaque } from './gl_screen.js';
+import { SCR_UpdateScreen } from './gl_screen.js';
 import { Sys_Error } from './sys.js';
 import { Draw_GetVirtualWidth, Draw_GetVirtualHeight } from './gl_draw.js';
 

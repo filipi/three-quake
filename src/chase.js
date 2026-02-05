@@ -1,6 +1,6 @@
 // Ported from: WinQuake/chase.c -- chase camera code
 
-import { PITCH, YAW, ROLL } from './quakedef.js';
+import { PITCH } from './quakedef.js';
 import { cvar_t, Cvar_RegisterVariable } from './cvar.js';
 import { VectorCopy, VectorSubtract, VectorMA, DotProduct,
 	AngleVectors, M_PI } from './mathlib.js';
