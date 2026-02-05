@@ -79,6 +79,12 @@ const _forward = new Float32Array( 3 );
 const _right = new Float32Array( 3 );
 const _up = new Float32Array( 3 );
 
+// Cached buffers for V_ParseDamage (Golden Rule #4)
+const _damage_from = new Float32Array( 3 );
+const _damage_forward = new Float32Array( 3 );
+const _damage_right = new Float32Array( 3 );
+const _damage_up = new Float32Array( 3 );
+
 export function V_CalcRoll( angles, velocity ) {
 
 	AngleVectors( angles, _forward, _right, _up );
@@ -321,7 +327,8 @@ export function V_ParseDamage() {
 
 	const armor = MSG_ReadByte();
 	const blood = MSG_ReadByte();
-	const from = new Float32Array( 3 );
+	// Use cached buffer to avoid per-call allocations (Golden Rule #4)
+	const from = _damage_from;
 	for ( let i = 0; i < 3; i ++ )
 		from[ i ] = MSG_ReadCoord();
 
@@ -365,9 +372,10 @@ export function V_ParseDamage() {
 	VectorSubtract( from, cl_simorg, from );
 	VectorNormalize( from );
 
-	const forward = new Float32Array( 3 );
-	const right = new Float32Array( 3 );
-	const up = new Float32Array( 3 );
+	// Use cached buffers to avoid per-call allocations (Golden Rule #4)
+	const forward = _damage_forward;
+	const right = _damage_right;
+	const up = _damage_up;
 	AngleVectors( cl_simangles, forward, right, up );
 
 	let side = DotProduct( from, right );
