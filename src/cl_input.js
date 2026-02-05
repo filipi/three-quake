@@ -17,6 +17,17 @@ import { lookspring, CL_Disconnect } from './cl_main.js';
 import { NET_SendUnreliableMessage } from './net_main.js';
 import { CL_StoreCommand, CL_GetValidSequence, CL_GetServerSequence } from './cl_pred.js';
 
+// Cached buffers for CL_SendMove (Golden Rule #4)
+const _sendmove_data = new Uint8Array( 128 );
+const _sendmove_buf = {
+	maxsize: 128,
+	cursize: 0,
+	data: _sendmove_data,
+	allowoverflow: false,
+	overflowed: false
+};
+const _sendmove_predAngles = new Float32Array( 3 );
+
 /*
 ===============================================================================
 
@@ -336,13 +347,9 @@ CL_SendMove
 */
 export function CL_SendMove( cmd ) {
 
-	const buf = {
-		maxsize: 128,
-		cursize: 0,
-		data: new Uint8Array( 128 ),
-		allowoverflow: false,
-		overflowed: false
-	};
+	const buf = _sendmove_buf;
+	buf.cursize = 0;
+	buf.overflowed = false;
 
 	cl.cmd = cmd;
 
@@ -384,13 +391,13 @@ export function CL_SendMove( cmd ) {
 	//
 	const predCmd = {
 		msec: Math.min( 255, Math.floor( host_frametime * 1000 ) ),
-		angles: new Float32Array( 3 ),
+		angles: _sendmove_predAngles,
 		forwardmove: cmd.forwardmove,
 		sidemove: cmd.sidemove,
 		upmove: cmd.upmove,
 		buttons: bits
 	};
-	VectorCopy( cl.viewangles, predCmd.angles );
+	VectorCopy( cl.viewangles, _sendmove_predAngles );
 	CL_StoreCommand( predCmd, realtime );
 
 	//

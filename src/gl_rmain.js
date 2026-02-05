@@ -387,17 +387,15 @@ export function R_SetupGL() {
 	);
 
 	// Build orientation using AngleVectors to get forward/right/up
-	const forward = new Float32Array( 3 );
-	const right = new Float32Array( 3 );
-	const up = new Float32Array( 3 );
-	AngleVectors( r_refdef.viewangles, forward, right, up );
+	AngleVectors( r_refdef.viewangles, _setupgl_forward, _setupgl_right, _setupgl_up );
 
 	// Build a rotation matrix from the Quake basis vectors.
 	// In Quake: forward = where camera looks, right = camera right, up = camera up.
 	// Three.js camera looks down -Z, X=right, Y=up.
 	// GLQuake uses glCullFace(GL_FRONT) to cull front faces (keeping back faces).
 	// We match this with THREE.BackSide on materials.
-	const m = new THREE.Matrix4();
+	const forward = _setupgl_forward, right = _setupgl_right, up = _setupgl_up;
+	const m = _setupgl_matrix;
 	m.set(
 		right[ 0 ], up[ 0 ], - forward[ 0 ], r_refdef.vieworg[ 0 ],
 		right[ 1 ], up[ 1 ], - forward[ 1 ], r_refdef.vieworg[ 1 ],
@@ -591,6 +589,12 @@ let _entityMeshesThisFrame = new Set();
 
 // Pre-allocated vector for dynamic light distance calculation (avoid per-frame allocation)
 const _dlightDist = [ 0, 0, 0 ];
+
+// Cached buffers for R_SetupGL (Golden Rule #4)
+const _setupgl_forward = new Float32Array( 3 );
+const _setupgl_right = new Float32Array( 3 );
+const _setupgl_up = new Float32Array( 3 );
+const _setupgl_matrix = new THREE.Matrix4();
 
 function R_DrawAliasModel( e ) {
 
@@ -867,7 +871,7 @@ export function R_PolyBlend() {
 export function R_RenderScene() {
 
 	// Begin new frame: clear the "this frame" set
-	_entityMeshesThisFrame = new Set();
+	_entityMeshesThisFrame.clear();
 
 	// Dynamic lights are managed by R_RenderDlights - it updates intensity
 	// each frame and removes expired lights from scene
@@ -1046,7 +1050,7 @@ export function R_NewMap() {
 	}
 
 	_entityMeshesInScene = new Set();
-	_entityMeshesThisFrame = new Set();
+	_entityMeshesThisFrame.clear();
 	_spriteMaterialCache.clear();
 
 	Debug_ClearLabels();

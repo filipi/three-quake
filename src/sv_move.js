@@ -13,6 +13,24 @@ const STEPSIZE = 18;
 
 const DI_NODIR = - 1;
 
+// Cached buffers for SV_CheckBottom (Golden Rule #4)
+const _checkbottom_mins = new Float32Array( 3 );
+const _checkbottom_maxs = new Float32Array( 3 );
+const _checkbottom_start = new Float32Array( 3 );
+const _checkbottom_stop = new Float32Array( 3 );
+
+// Cached buffers for SV_movestep (Golden Rule #4)
+const _movestep_oldorg = new Float32Array( 3 );
+const _movestep_neworg = new Float32Array( 3 );
+const _movestep_end = new Float32Array( 3 );
+
+// Cached buffers for SV_StepDirection (Golden Rule #4)
+const _stepdir_move = new Float32Array( 3 );
+const _stepdir_oldorigin = new Float32Array( 3 );
+
+// Cached buffer for SV_NewChaseDir (Golden Rule #4)
+const _chasedir_d = new Float32Array( 3 );
+
 // Debug counters
 let c_yes = 0;
 let c_no = 0;
@@ -40,10 +58,10 @@ is not a staircase.
 */
 export function SV_CheckBottom( ent ) {
 
-	const mins = new Float32Array( 3 );
-	const maxs = new Float32Array( 3 );
-	const start = new Float32Array( 3 );
-	const stop = new Float32Array( 3 );
+	const mins = _checkbottom_mins;
+	const maxs = _checkbottom_maxs;
+	const start = _checkbottom_start;
+	const stop = _checkbottom_stop;
 
 	VectorAdd( ent.v.origin, ent.v.mins, mins );
 	VectorAdd( ent.v.origin, ent.v.maxs, maxs );
@@ -132,9 +150,9 @@ pr_global_struct.trace_normal is set to the normal of the blocking wall
 */
 export function SV_movestep( ent, move, relink ) {
 
-	const oldorg = new Float32Array( 3 );
-	const neworg = new Float32Array( 3 );
-	const end = new Float32Array( 3 );
+	const oldorg = _movestep_oldorg;
+	const neworg = _movestep_neworg;
+	const end = _movestep_end;
 
 	// try the move
 	VectorCopy( ent.v.origin, oldorg );
@@ -264,8 +282,8 @@ facing it.
 */
 export function SV_StepDirection( ent, yaw, dist ) {
 
-	const move = new Float32Array( 3 );
-	const oldorigin = new Float32Array( 3 );
+	const move = _stepdir_move;
+	const oldorigin = _stepdir_oldorigin;
 
 	ent.v.ideal_yaw = yaw;
 	PF_changeyaw();
@@ -315,7 +333,7 @@ SV_NewChaseDir
 */
 export function SV_NewChaseDir( actor, enemy, dist ) {
 
-	const d = new Float32Array( 3 );
+	const d = _chasedir_d;
 
 	const olddir = anglemod( ( ( actor.v.ideal_yaw / 45 ) | 0 ) * 45 );
 	const turnaround = anglemod( olddir - 180 );
