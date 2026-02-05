@@ -1193,8 +1193,8 @@ function M_NetStart_Change( dir ) {
 
 		case 1: // Max players
 			maxplayers += dir;
-			if ( maxplayers > 16 )
-				maxplayers = 16;
+			if ( maxplayers > 4 )
+				maxplayers = 4;
 			if ( maxplayers < 2 )
 				maxplayers = 2;
 			break;
