@@ -103,6 +103,9 @@ const _flymove_planes = [];
 for ( let i = 0; i < MAX_CLIP_PLANES; i ++ )
 	_flymove_planes[ i ] = new Float32Array( 3 );
 
+// Cached buffer for SV_PushEntity (Golden Rule #4)
+const _pushentity_end = new Float32Array( 3 );
+
 // Cached buffers for SV_PushRotate (Golden Rule #4)
 const _pushrotate_amove = new Float32Array( 3 );
 const _pushrotate_a = new Float32Array( 3 );
@@ -551,7 +554,8 @@ Does not change the entities velocity at all
 */
 export function SV_PushEntity( ent, push ) {
 
-	const end = new Float32Array( 3 );
+	// Use cached buffer instead of allocating per-call
+	const end = _pushentity_end;
 
 	VectorAdd( ent.v.origin, push, end );
 
