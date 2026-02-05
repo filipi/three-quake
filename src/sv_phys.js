@@ -106,6 +106,17 @@ for ( let i = 0; i < MAX_CLIP_PLANES; i ++ )
 // Cached buffer for SV_PushEntity (Golden Rule #4)
 const _pushentity_end = new Float32Array( 3 );
 
+// Cached buffers for SV_PushMove (Golden Rule #4)
+const _pushmove_mins = new Float32Array( 3 );
+const _pushmove_maxs = new Float32Array( 3 );
+const _pushmove_move = new Float32Array( 3 );
+const _pushmove_entorig = new Float32Array( 3 );
+const _pushmove_pushorig = new Float32Array( 3 );
+const _pushmove_moved_edict = new Array( MAX_EDICTS );
+const _pushmove_moved_from = [];
+for ( let i = 0; i < MAX_EDICTS; i ++ )
+	_pushmove_moved_from[ i ] = new Float32Array( 3 );
+
 // Cached buffers for SV_PushRotate (Golden Rule #4)
 const _pushrotate_amove = new Float32Array( 3 );
 const _pushrotate_a = new Float32Array( 3 );
@@ -739,15 +750,14 @@ SV_PushMove
 */
 export function SV_PushMove( pusher, movetime ) {
 
-	const mins = new Float32Array( 3 );
-	const maxs = new Float32Array( 3 );
-	const move = new Float32Array( 3 );
-	const entorig = new Float32Array( 3 );
-	const pushorig = new Float32Array( 3 );
-	const moved_edict = new Array( MAX_EDICTS );
-	const moved_from = [];
-	for ( let i = 0; i < MAX_EDICTS; i ++ )
-		moved_from[ i ] = new Float32Array( 3 );
+	// Use cached buffers to avoid per-call allocations (Golden Rule #4)
+	const mins = _pushmove_mins;
+	const maxs = _pushmove_maxs;
+	const move = _pushmove_move;
+	const entorig = _pushmove_entorig;
+	const pushorig = _pushmove_pushorig;
+	const moved_edict = _pushmove_moved_edict;
+	const moved_from = _pushmove_moved_from;
 
 	if ( pusher.v.velocity[ 0 ] === 0 && pusher.v.velocity[ 1 ] === 0 && pusher.v.velocity[ 2 ] === 0 ) {
 
