@@ -36,7 +36,8 @@ let gyroEnabled = false;
 let gyroPermissionRequested = false;
 let prevBeta = null;
 let prevGamma = null;
-const GYRO_SENSITIVITY = 4.0;
+const GYRO_SENSITIVITY = 8.0;
+const LOOK_SENSITIVITY = 3.0;
 
 // UI elements
 let overlay = null;
@@ -393,8 +394,8 @@ function onTouchMove( e ) {
 			const dx = touch.clientX - lastLookPos.x;
 			const dy = touch.clientY - lastLookPos.y;
 
-			lookDeltaX += dx;
-			lookDeltaY += dy;
+			lookDeltaX += dx * LOOK_SENSITIVITY;
+			lookDeltaY += dy * LOOK_SENSITIVITY;
 
 			lastLookPos.x = touch.clientX;
 			lastLookPos.y = touch.clientY;
