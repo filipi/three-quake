@@ -23,7 +23,7 @@ import {
 	R_DrawParticles as R_DrawParticles_impl
 } from './r_part.js';
 import { Debug_UpdateOverlay, Debug_ClearLabels } from './debug_overlay.js';
-import { isXRActive, getXRRig, getControllerGripRight, XR_SetCamera, XR_SCALE } from './webxr.js';
+import { isXRActive, getXRRig, getControllerGripRight, XR_SetCamera, XR_SCALE, XR_GetGripWorldPose } from './webxr.js';
 import {
 	cl, cl_visedicts, cl_numvisedicts, cl_dlights, cl_entities,
 	cl_lightstyle
@@ -622,31 +622,29 @@ export function R_DrawViewModel() {
 	if ( mesh == null )
 		return;
 
-	// In XR mode: override weapon position/rotation to follow the right controller
+	// In XR mode: compute world-space weapon position from grip pose.
+	// We do NOT parent to the grip (which inherits xrOffset's +40 Z offset).
+	// Instead, keep the mesh in the scene and manually set its world position.
 	if ( isXRActive() ) {
 
-		const grip = getControllerGripRight();
-		if ( grip != null ) {
+		// Ensure weapon mesh is in the scene (not parented to grip)
+		if ( mesh.parent !== scene && scene != null ) {
 
-			// Parent the weapon to the grip so it follows the controller.
-			// The grip is a child of the rig (which is at player vieworg).
-			// Grip local coords are in XR meters, so we scale the weapon
-			// model down by 1/XR_SCALE to match (weapon is built in Quake units).
-			if ( mesh.parent !== grip ) {
+			scene.add( mesh );
+			_entityMeshesInScene.add( mesh );
 
-				grip.add( mesh );
+		}
 
-			}
+		if ( XR_GetGripWorldPose( _xrGripWorldPos, _xrGripQuat ) ) {
 
-			// Local transform relative to grip:
-			// Position offset in grip-local space (meters)
-			mesh.position.set( 0, - 0.075, - 0.15 );
+			// Set world-space position directly
+			mesh.position.copy( _xrGripWorldPos );
 
-			// Rotation: align Quake model axes to XR grip axes.
-			mesh.quaternion.copy( _xrWeaponAlignQuat );
+			// Rotation: rigQuat * gripQuat * alignmentQuat
+			mesh.quaternion.copy( _xrGripQuat ).multiply( _xrWeaponAlignQuat );
 
-			// Scale down from Quake units to meters (grip space is in meters)
-			mesh.scale.setScalar( 1 / XR_SCALE );
+			// Geometry is already in Quake units, scene is in Quake units — scale 1
+			mesh.scale.setScalar( 1 );
 
 		}
 
@@ -657,7 +655,7 @@ export function R_DrawViewModel() {
 
 	} else {
 
-		// If returning from XR, re-parent mesh to scene and reset scale
+		// Non-XR: ensure mesh is in scene (handles returning from XR too)
 		if ( mesh.parent !== scene && scene != null ) {
 
 			scene.add( mesh );

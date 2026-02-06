@@ -14,6 +14,19 @@ import { renderer } from './vid.js';
 export const XR_SCALE = 40;
 
 //============================================================================
+// Pre-allocated temp objects for XR_GetGripWorldPose (Golden Rule #4)
+//============================================================================
+
+const _gripPos = new THREE.Vector3();
+const _gripQuat = new THREE.Quaternion();
+const _headPos = new THREE.Vector3();
+const _headQuat = new THREE.Quaternion();
+const _headScale = new THREE.Vector3();
+const _gripScale = new THREE.Vector3();
+const _relativeOffset = new THREE.Vector3();
+const _rigQuat = new THREE.Quaternion();
+
+//============================================================================
 // State
 //============================================================================
 
@@ -194,6 +207,68 @@ export function XR_PollInput() {
 		}
 
 	}
+
+}
+
+//============================================================================
+// XR_GetGripWorldPose
+//
+// Computes the right controller grip's world-space position and quaternion
+// in Quake coordinates. Instead of parenting the weapon to the grip (which
+// inherits the xrOffset's +40 Z), we manually compute world position:
+//
+//   1. Read grip pose from grip.matrix (meters, XR reference space)
+//   2. Read headset pose from renderer.xr.getCamera().matrix (same space)
+//   3. Compute relative offset (grip - head) in meters
+//   4. Scale by XR_SCALE to convert to Quake units
+//   5. Rotate by rig quaternion (XR ref space -> Quake world space)
+//   6. Add rig position (vieworg) for final world position
+//   7. Rotation: rigQuat * gripQuat
+//
+// Returns false if grip or XR is not available.
+//============================================================================
+
+export function XR_GetGripWorldPose( outPos, outQuat ) {
+
+	if ( xrSessionActive === false ) return false;
+	if ( controllerGripRight == null ) return false;
+	if ( xrRig == null ) return false;
+
+	const xrCamera = renderer.xr.getCamera();
+	if ( xrCamera == null ) return false;
+
+	// Force the grip to update its world matrix through the scene graph
+	controllerGripRight.updateWorldMatrix( true, false );
+
+	// Decompose grip's world matrix to get position/rotation in XR ref space.
+	// The grip is a child of xrOffset (z=40), so its matrixWorld includes
+	// the rig transform + xrOffset. We want the raw XR-space pose instead,
+	// so we decompose the grip's LOCAL matrix (which is the raw XR pose).
+	controllerGripRight.matrix.decompose( _gripPos, _gripQuat, _gripScale );
+
+	// Get headset position in XR reference space (local matrix of the XR camera)
+	// The XR camera's matrix (not matrixWorld) is the raw headset pose.
+	xrCamera.matrix.decompose( _headPos, _headQuat, _headScale );
+
+	// Compute relative offset in XR meters: grip position relative to head
+	_relativeOffset.copy( _gripPos ).sub( _headPos );
+
+	// Scale from meters to Quake units
+	_relativeOffset.multiplyScalar( XR_SCALE );
+
+	// Get the rig's world-space quaternion (converts XR ref space to Quake world)
+	xrRig.getWorldQuaternion( _rigQuat );
+
+	// Rotate the relative offset by the rig quaternion
+	_relativeOffset.applyQuaternion( _rigQuat );
+
+	// Final world position = rig position + rotated offset
+	outPos.copy( xrRig.position ).add( _relativeOffset );
+
+	// Final world rotation = rigQuat * gripQuat
+	outQuat.copy( _rigQuat ).multiply( _gripQuat );
+
+	return true;
 
 }
 
