@@ -17,8 +17,9 @@ import { Cmd_AddCommand } from './cmd.js';
 import { Con_Printf } from './console.js';
 import { cl, cls, ca_connected } from './client.js';
 import { m_pitch, m_yaw, m_forward, m_side, lookstrafe } from './cl_main.js';
-import { in_mlook, in_strafe, cl_forwardspeed, cl_sidespeed } from './cl_input.js';
+import { in_mlook, in_strafe, cl_forwardspeed, cl_sidespeed, cl_yawspeed } from './cl_input.js';
 import { V_StopPitchDrift } from './view.js';
+import { host_frametime } from './host.js';
 import { PITCH, YAW } from './quakedef.js';
 import {
 	Touch_IsMobile, Touch_Init, Touch_Enable, Touch_Disable, Touch_IsEnabled,
@@ -27,6 +28,7 @@ import {
 } from './touch.js';
 import { M_TouchInput } from './menu.js';
 import { S_UnlockAudio } from './snd_dma.js';
+import { isXRActive, XR_PollInput, xrInput } from './webxr.js';
 
 /*
 ===========================================================================
@@ -102,6 +104,10 @@ let isMobile = false;
 
 // Meta Quest — disables pointer lock and fullscreen
 let isQuest = false;
+
+// XR trigger edge detection
+let _xrPrevLeftTrigger = false;
+let _xrPrevRightTrigger = false;
 
 function requestPointerLock() {
 
@@ -643,6 +649,44 @@ export function IN_Move( cmd ) {
 	} else {
 
 		cmd.forwardmove -= m_forward.value * my;
+
+	}
+
+	// XR controller input
+	if ( isXRActive() ) {
+
+		XR_PollInput();
+
+		// Left thumbstick → movement
+		// Apply deadzone to avoid drift
+		const deadzone = 0.15;
+		const stickX = Math.abs( xrInput.moveX ) > deadzone ? xrInput.moveX : 0;
+		const stickY = Math.abs( xrInput.moveY ) > deadzone ? xrInput.moveY : 0;
+
+		cmd.forwardmove -= cl_forwardspeed.value * stickY;
+		cmd.sidemove += cl_sidespeed.value * stickX;
+
+		// Right thumbstick → horizontal look (yaw)
+		const lookX = Math.abs( xrInput.lookX ) > deadzone ? xrInput.lookX : 0;
+		cl.viewangles[ YAW ] -= lookX * cl_yawspeed.value * host_frametime * 2;
+
+		// Left trigger → jump (K_SPACE)
+		const leftDown = xrInput.leftTrigger > 0.5;
+		if ( leftDown !== _xrPrevLeftTrigger ) {
+
+			Key_Event( K_SPACE, leftDown );
+			_xrPrevLeftTrigger = leftDown;
+
+		}
+
+		// Right trigger → attack (K_MOUSE1)
+		const rightDown = xrInput.rightTrigger > 0.5;
+		if ( rightDown !== _xrPrevRightTrigger ) {
+
+			Key_Event( K_MOUSE1, rightDown );
+			_xrPrevRightTrigger = rightDown;
+
+		}
 
 	}
 
