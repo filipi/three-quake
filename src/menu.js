@@ -1875,15 +1875,14 @@ function M_Keys_Key( key ) {
 ==============================================================================
 */
 
-let setup_cursor = 4;
-const setup_cursor_table = [ 40, 56, 80, 104, 140 ];
-let setup_hostname = 'hostname';
+let setup_cursor = 3;
+const setup_cursor_table = [ 40, 64, 88, 124 ];
 let setup_myname = 'player';
 let setup_oldtop = 0;
 let setup_oldbottom = 0;
 let setup_top = 0;
 let setup_bottom = 0;
-const NUM_SETUP_CMDS = 5;
+const NUM_SETUP_CMDS = 4;
 
 function M_Menu_Setup_f() {
 
@@ -1893,7 +1892,6 @@ function M_Menu_Setup_f() {
 
 	// Initialize from current values
 	setup_myname = _cl_name ? _cl_name.string : 'player';
-	// setup_hostname would come from hostname cvar if we had it
 	setup_top = setup_oldtop = ( cl_color.value | 0 ) >> 4;
 	setup_bottom = setup_oldbottom = ( cl_color.value | 0 ) & 15;
 
@@ -1907,34 +1905,27 @@ function M_Setup_Draw() {
 	const p = _Draw_CachePic( 'gfx/p_multi.lmp' );
 	M_DrawPic( ( 320 - ( p ? p.width : 0 ) ) / 2, 4, p );
 
-	M_Print( 64, 40, 'Hostname' );
+	M_Print( 64, 40, 'Your name' );
 	M_DrawTextBox( 160, 32, 16, 1 );
-	M_Print( 168, 40, setup_hostname );
+	M_Print( 168, 40, setup_myname );
 
-	M_Print( 64, 56, 'Your name' );
-	M_DrawTextBox( 160, 48, 16, 1 );
-	M_Print( 168, 56, setup_myname );
+	M_Print( 64, 64, 'Shirt color' );
+	M_Print( 64, 88, 'Pants color' );
 
-	M_Print( 64, 80, 'Shirt color' );
-	M_Print( 64, 104, 'Pants color' );
-
-	M_DrawTextBox( 64, 132, 14, 1 );
-	M_Print( 72, 140, 'Accept Changes' );
+	M_DrawTextBox( 64, 116, 14, 1 );
+	M_Print( 72, 124, 'Accept Changes' );
 
 	// Draw player color preview (bigbox + menuplyr with color translation)
 	const bigbox = _Draw_CachePic( 'gfx/bigbox.lmp' );
-	M_DrawTransPic( 160, 64, bigbox );
+	M_DrawTransPic( 160, 48, bigbox );
 	const menuplyr = _Draw_CachePic( 'gfx/menuplyr.lmp' );
 	M_BuildTranslationTable( setup_top * 16, setup_bottom * 16 );
-	M_DrawTransPicTranslate( 172, 72, menuplyr );
+	M_DrawTransPicTranslate( 172, 56, menuplyr );
 
 	M_DrawCharacter( 56, setup_cursor_table[ setup_cursor ], 12 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
 
-	// Draw blinking cursor on text fields
+	// Draw blinking cursor on text field
 	if ( setup_cursor === 0 )
-		M_DrawCharacter( 168 + 8 * setup_hostname.length, setup_cursor_table[ setup_cursor ], 10 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
-
-	if ( setup_cursor === 1 )
 		M_DrawCharacter( 168 + 8 * setup_myname.length, setup_cursor_table[ setup_cursor ], 10 + ( ( Math.floor( _realtime_get() * 4 ) ) & 1 ) );
 
 }
@@ -1959,40 +1950,40 @@ function M_Setup_Key( key ) {
 				setup_cursor = 0;
 			break;
 		case K_LEFTARROW:
-			if ( setup_cursor < 2 )
+			if ( setup_cursor < 1 )
 				return;
 			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu3.wav' );
-			if ( setup_cursor === 2 )
+			if ( setup_cursor === 1 )
 				setup_top = setup_top - 1;
-			if ( setup_cursor === 3 )
+			if ( setup_cursor === 2 )
 				setup_bottom = setup_bottom - 1;
 			break;
 		case K_RIGHTARROW:
-			if ( setup_cursor < 2 )
+			if ( setup_cursor < 1 )
 				return;
 			if ( _S_LocalSound ) _S_LocalSound( 'misc/menu3.wav' );
-			if ( setup_cursor === 2 )
+			if ( setup_cursor === 1 )
 				setup_top = setup_top + 1;
-			if ( setup_cursor === 3 )
+			if ( setup_cursor === 2 )
 				setup_bottom = setup_bottom + 1;
 			break;
 		case K_ENTER:
-			if ( setup_cursor === 0 || setup_cursor === 1 )
+			if ( setup_cursor === 0 )
 				return;
 
-			if ( setup_cursor === 2 || setup_cursor === 3 ) {
+			if ( setup_cursor === 1 || setup_cursor === 2 ) {
 
 				// ENTER on color items acts as RIGHT arrow (goto forward in C)
 				if ( _S_LocalSound ) _S_LocalSound( 'misc/menu3.wav' );
-				if ( setup_cursor === 2 )
+				if ( setup_cursor === 1 )
 					setup_top = setup_top + 1;
-				if ( setup_cursor === 3 )
+				if ( setup_cursor === 2 )
 					setup_bottom = setup_bottom + 1;
 				break;
 
 			}
 
-			// setup_cursor == 4 (Accept)
+			// setup_cursor == 3 (Accept)
 			Cbuf_AddText( 'name "' + setup_myname + '"\n' );
 			if ( setup_top !== setup_oldtop || setup_bottom !== setup_oldbottom )
 				Cbuf_AddText( 'color ' + setup_top + ' ' + setup_bottom + '\n' );
@@ -2003,13 +1994,6 @@ function M_Setup_Key( key ) {
 
 		case K_BACKSPACE:
 			if ( setup_cursor === 0 ) {
-
-				if ( setup_hostname.length > 0 )
-					setup_hostname = setup_hostname.substring( 0, setup_hostname.length - 1 );
-
-			}
-
-			if ( setup_cursor === 1 ) {
 
 				if ( setup_myname.length > 0 )
 					setup_myname = setup_myname.substring( 0, setup_myname.length - 1 );
@@ -2024,13 +2008,6 @@ function M_Setup_Key( key ) {
 				break;
 
 			if ( setup_cursor === 0 ) {
-
-				if ( setup_hostname.length < 15 )
-					setup_hostname = setup_hostname + String.fromCharCode( key );
-
-			}
-
-			if ( setup_cursor === 1 ) {
 
 				if ( setup_myname.length < 15 )
 					setup_myname = setup_myname + String.fromCharCode( key );
