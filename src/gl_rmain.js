@@ -23,7 +23,7 @@ import {
 	R_DrawParticles as R_DrawParticles_impl
 } from './r_part.js';
 import { Debug_UpdateOverlay, Debug_ClearLabels } from './debug_overlay.js';
-import { isXRActive, getXRRig, XR_SetCamera, XR_SCALE, XR_GetGripWorldPose } from './webxr.js';
+import { isXRActive, getXRRig, XR_SetCamera, XR_SCALE, XR_GetControllerWorldPose } from './webxr.js';
 import {
 	cl, cl_visedicts, cl_numvisedicts, cl_dlights, cl_entities,
 	cl_lightstyle
@@ -593,13 +593,13 @@ function _viewmodelAfterRender( r ) {
 function _noop() {}
 
 // Cached objects for XR weapon positioning (Golden Rule #4: no allocations in render loop)
-const _xrGripWorldPos = new THREE.Vector3();
-const _xrGripQuat = new THREE.Quaternion();
+const _xrControllerWorldPos = new THREE.Vector3();
+const _xrControllerQuat = new THREE.Quaternion();
 
-// Alignment quaternion: maps Quake model axes to XR grip axes.
+// Alignment quaternion: maps Quake model axes to XR controller axes.
 // Quake model: +X = barrel forward, +Y = left, +Z = up
-// XR grip:     -Z = forward,       -X = left,  +Y = up
-// Rotation matrix: model→grip = [[0,-1,0],[0,0,1],[-1,0,0]]
+// XR pointer:  -Z = forward,       -X = left,  +Y = up
+// Rotation matrix: model→controller = [[0,-1,0],[0,0,1],[-1,0,0]]
 const _xrWeaponAlignQuat = new THREE.Quaternion().setFromRotationMatrix(
 	new THREE.Matrix4().set(
 		0, - 1, 0, 0,
@@ -643,10 +643,10 @@ export function R_DrawViewModel() {
 	if ( mesh == null )
 		return;
 
-	// In XR mode: position weapon at controller grip.
-	// Scene is scaled 1/XR_SCALE (meters). Grip world pos is in meters.
+	// In XR mode: position weapon at controller.
+	// Scene is scaled 1/XR_SCALE (meters). Controller world pos is in meters.
 	// Weapon mesh is a child of scene, so its position is in scene-local Quake units.
-	// Convert: grip meters * XR_SCALE = Quake units.
+	// Convert: controller meters * XR_SCALE = Quake units.
 	if ( isXRActive() ) {
 
 		// Ensure weapon mesh is in the scene
@@ -657,13 +657,13 @@ export function R_DrawViewModel() {
 
 		}
 
-		if ( XR_GetGripWorldPose( _xrGripWorldPos, _xrGripQuat ) ) {
+		if ( XR_GetControllerWorldPose( _xrControllerWorldPos, _xrControllerQuat ) ) {
 
-			// Grip world pos is in meters → multiply by XR_SCALE for scene-local Quake units
-			mesh.position.copy( _xrGripWorldPos ).multiplyScalar( XR_SCALE );
+			// Controller world pos is in meters → multiply by XR_SCALE for scene-local Quake units
+			mesh.position.copy( _xrControllerWorldPos ).multiplyScalar( XR_SCALE );
 
-			// Rotation: grip world quat * alignment to orient Quake model axes
-			mesh.quaternion.copy( _xrGripQuat ).multiply( _xrWeaponAlignQuat );
+			// Rotation: controller world quat * alignment to orient Quake model axes
+			mesh.quaternion.copy( _xrControllerQuat ).multiply( _xrWeaponAlignQuat );
 
 			// Scale 1: geometry is in Quake units, scene.scale handles the rest
 			mesh.scale.setScalar( 1 );

@@ -16,6 +16,10 @@ import { V_StartPitchDrift, V_StopPitchDrift } from './view.js';
 import { lookspring, CL_Disconnect } from './cl_main.js';
 import { NET_SendUnreliableMessage } from './net_main.js';
 import { CL_StoreCommand, CL_GetValidSequence, CL_GetServerSequence } from './cl_pred.js';
+import { isXRActive, XR_GetAimAngles } from './webxr.js';
+
+// Pre-allocated array for XR aim angles (Golden Rule #4)
+const _xrAimAngles = new Float32Array( 3 );
 
 // Cached buffers for CL_SendMove (Golden Rule #4)
 const _sendmove_data = new Uint8Array( 128 );
@@ -360,8 +364,19 @@ export function CL_SendMove( cmd ) {
 
 	MSG_WriteFloat( buf, cl.mtime[ 0 ] ); // so server can get ping times
 
-	for ( let i = 0; i < 3; i ++ )
-		MSG_WriteAngle( buf, cl.viewangles[ i ] );
+	// In XR mode, send controller aim direction instead of head direction
+	// so weapons fire where the controller points
+	if ( isXRActive() && XR_GetAimAngles( _xrAimAngles ) ) {
+
+		for ( let i = 0; i < 3; i ++ )
+			MSG_WriteAngle( buf, _xrAimAngles[ i ] );
+
+	} else {
+
+		for ( let i = 0; i < 3; i ++ )
+			MSG_WriteAngle( buf, cl.viewangles[ i ] );
+
+	}
 
 	MSG_WriteShort( buf, cmd.forwardmove );
 	MSG_WriteShort( buf, cmd.sidemove );
