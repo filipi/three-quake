@@ -6,12 +6,12 @@ import { MAX_MODELS, MAX_SOUNDS, MAX_EDICTS, MAX_LIGHTSTYLES,
 	STAT_SECRETS } from './quakedef.js';
 import { Con_Printf, Con_DPrintf, SZ_Alloc, SZ_Clear,
 	MSG_WriteByte, MSG_WriteString } from './common.js';
-import { NET_Connect, NET_SendMessage, NET_CanSendMessage, NET_Close } from './net_main.js';
+import { NET_Connect, NET_SendMessage, NET_SendUnreliableMessage, NET_CanSendMessage, NET_Close } from './net_main.js';
 import { cvar_t, Cvar_RegisterVariable, Cvar_VariableValue } from './cvar.js';
 import { Cmd_AddCommand } from './cmd.js';
 import { Cbuf_InsertText } from './cmd.js';
 import { clc_disconnect, clc_stringcmd } from './protocol.js';
-import { CL_GetMessage, CL_PlayDemo_f } from './cl_demo.js';
+import { CL_GetMessage, CL_PlayDemo_f, CL_StopPlayback, CL_Stop_f } from './cl_demo.js';
 import { CL_ParseServerMessage } from './cl_parse.js';
 import { SIGNONS, MAX_DLIGHTS, MAX_EFRAGS, MAX_BEAMS, MAX_TEMP_ENTITIES,
 	MAX_STATIC_ENTITIES, MAX_DEMOS, MAX_VISEDICTS,
@@ -25,7 +25,7 @@ import { SIGNONS, MAX_DLIGHTS, MAX_EFRAGS, MAX_BEAMS, MAX_TEMP_ENTITIES,
 import { anglemod, VectorCopy, VectorMA, AngleVectors } from './mathlib.js';
 import { R_RocketTrail, R_RemoveEfrags, R_EntityParticles } from './render.js';
 import { CL_InitTEnts, CL_UpdateTEnts } from './cl_tent.js';
-import { host_frametime, realtime, Host_Error, sv } from './host.js';
+import { host_frametime, realtime, Host_Error, Host_ShutdownServer, sv } from './host.js';
 import { SCR_EndLoadingPlaque, SCR_BeginLoadingPlaque } from './gl_screen.js';
 import { S_StopAllSounds } from './snd_dma.js';
 import { M_ConnectionError, M_ShouldReturnOnError } from './menu.js';
@@ -202,7 +202,7 @@ export function CL_Disconnect() {
 		Con_DPrintf( 'Sending clc_disconnect\n' );
 		SZ_Clear( cls.message );
 		MSG_WriteByte( cls.message, clc_disconnect );
-		// NET_SendUnreliableMessage( cls.netcon, cls.message );
+		NET_SendUnreliableMessage( cls.netcon, cls.message );
 		SZ_Clear( cls.message );
 
 		if ( cls.netcon != null ) {
@@ -213,8 +213,8 @@ export function CL_Disconnect() {
 		}
 
 		cls.state = ca_disconnected;
-		// if ( sv.active )
-		//     Host_ShutdownServer( false );
+		if ( sv.active )
+			Host_ShutdownServer( false );
 
 	}
 
@@ -226,8 +226,8 @@ export function CL_Disconnect() {
 export function CL_Disconnect_f() {
 
 	CL_Disconnect();
-	// if ( sv.active )
-	//     Host_ShutdownServer( false );
+	if ( sv.active )
+		Host_ShutdownServer( false );
 
 	// Clear room from browser URL on explicit disconnect
 	if ( typeof window !== 'undefined' && window.location.search.includes( 'room=' ) ) {
@@ -549,7 +549,7 @@ export function CL_LerpPoint() {
 
 	let f = cl.mtime[ 0 ] - cl.mtime[ 1 ];
 
-	if ( f === 0 || cl_nolerp.value !== 0 || cls.timedemo /* || sv.active */ ) {
+	if ( f === 0 || cl_nolerp.value !== 0 || cls.timedemo || sv.active ) {
 
 		cl.time = cl.mtime[ 0 ];
 		return 1;
@@ -1110,6 +1110,33 @@ export function CL_RelinkEntities() {
 
 		}
 
+		// Particle trails based on model flags
+		// Ported from WinQuake/cl_main.c:587-606
+		if ( ent.model != null ) {
+
+			if ( ent.model.flags & 0x04 ) // EF_GIB
+				R_RocketTrail( _relinkOldorg, ent.origin, 2 );
+			else if ( ent.model.flags & 0x20 ) // EF_ZOMGIB
+				R_RocketTrail( _relinkOldorg, ent.origin, 4 );
+			else if ( ent.model.flags & 0x10 ) // EF_TRACER
+				R_RocketTrail( _relinkOldorg, ent.origin, 3 );
+			else if ( ent.model.flags & 0x40 ) // EF_TRACER2
+				R_RocketTrail( _relinkOldorg, ent.origin, 5 );
+			else if ( ent.model.flags & 0x01 ) { // EF_ROCKET
+
+				R_RocketTrail( _relinkOldorg, ent.origin, 0 );
+				const dl = CL_AllocDlight( i );
+				VectorCopy( ent.origin, dl.origin );
+				dl.radius = 200;
+				dl.die = cl.time + 0.01;
+
+			} else if ( ent.model.flags & 0x02 ) // EF_GRENADE
+				R_RocketTrail( _relinkOldorg, ent.origin, 1 );
+			else if ( ent.model.flags & 0x80 ) // EF_TRACER3
+				R_RocketTrail( _relinkOldorg, ent.origin, 6 );
+
+		}
+
 		ent.forcelink = false;
 
 		if ( i === cl.viewentity && Cvar_VariableValue( 'chase_active' ) === 0 )
@@ -1293,18 +1320,7 @@ function CL_InitInput() {
 
 // CL_InitTEnts: imported from cl_tent.js
 
-// Import from cl_demo.js stubs
-function CL_StopPlayback() {
-
-	// Will be implemented in cl_demo.js
-
-}
-
-function CL_Stop_f() {
-
-	// Will be implemented in cl_demo.js
-
-}
+// CL_StopPlayback and CL_Stop_f: imported from cl_demo.js
 
 // Forward declarations for cvars and functions defined in cl_input.js
 import { cl_upspeed, cl_forwardspeed, cl_backspeed, cl_sidespeed,
