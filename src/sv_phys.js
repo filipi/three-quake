@@ -2,6 +2,7 @@
 
 import { Sys_Error } from './sys.js';
 import { Con_Printf, Con_DPrintf } from './common.js';
+import { cvar_t } from './cvar.js';
 import { vec3_origin, DotProduct, VectorCopy, VectorAdd, VectorSubtract, VectorMA,
 	VectorScale, VectorCompare, VectorNormalize, CrossProduct, Length, AngleVectors,
 	M_PI, anglemod } from './mathlib.js';
@@ -163,13 +164,17 @@ for ( let i = 0; i < MAX_EDICTS; i ++ )
 	_pushrotate_moved_from[ i ] = new Float32Array( 3 );
 
 //
-// cvars
+// cvars (proper cvar_t instances, registered in sv_main.js SV_Init)
 //
-export const sv_friction = { name: 'sv_friction', string: '4', value: 4, server: true };
-export const sv_stopspeed = { name: 'sv_stopspeed', string: '100', value: 100 };
-export const sv_gravity = { name: 'sv_gravity', string: '800', value: 800, server: true };
-export const sv_maxvelocity = { name: 'sv_maxvelocity', string: '2000', value: 2000 };
-export const sv_nostep = { name: 'sv_nostep', string: '0', value: 0 };
+export const sv_maxvelocity = new cvar_t( 'sv_maxvelocity', '2000' );
+export const sv_gravity = new cvar_t( 'sv_gravity', '800' );
+export const sv_nostep = new cvar_t( 'sv_nostep', '0' );
+export const sv_friction = new cvar_t( 'sv_friction', '4' );
+export const sv_edgefriction = new cvar_t( 'sv_edgefriction', '2' );
+export const sv_stopspeed = new cvar_t( 'sv_stopspeed', '100' );
+export const sv_maxspeed = new cvar_t( 'sv_maxspeed', '320' );
+export const sv_accelerate = new cvar_t( 'sv_accelerate', '10' );
+export const sv_idealpitchscale = new cvar_t( 'sv_idealpitchscale', '0.8' );
 
 //
 // External references (set by the engine during initialization)
@@ -741,6 +746,7 @@ export function SV_PushRotate( pusher, movetime ) {
 
 			VectorCopy( pushorig, pusher.v.angles );
 			SV_LinkEdict( pusher, false );
+			pusher.v.ltime -= movetime;
 
 			// If the pusher has a "blocked" function, call it
 			if ( pusher.v.blocked ) {
