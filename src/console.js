@@ -644,7 +644,7 @@ export function Con_NotifyBox( text ) {
 ==============================================================================
 */
 
-// Simple sprintf implementation for common Quake format strings
+// sprintf implementation supporting width, precision, and flags for Quake format strings
 function _sprintf( fmt, ...args ) {
 
 	if ( typeof fmt !== 'string' ) return String( fmt );
@@ -658,34 +658,139 @@ function _sprintf( fmt, ...args ) {
 		if ( fmt[ i ] === '%' && i + 1 < fmt.length ) {
 
 			i ++;
-			// skip flags
-			while ( i < fmt.length && '0123456789.-+ #'.indexOf( fmt[ i ] ) >= 0 )
-				i ++;
 
-			switch ( fmt[ i ] ) {
+			// Parse flags: -, +, 0, space, #
+			let leftAlign = false;
+			let zeroPad = false;
+			let plusSign = false;
+			let spaceSign = false;
 
-				case 's':
-					result += String( args[ argIdx ++ ] || '' );
-					break;
-				case 'd':
-				case 'i':
-					result += Math.floor( Number( args[ argIdx ++ ] ) || 0 );
-					break;
-				case 'f':
-					result += Number( args[ argIdx ++ ] ) || 0;
-					break;
-				case 'c':
-					result += String.fromCharCode( args[ argIdx ++ ] || 0 );
-					break;
-				case '%':
-					result += '%';
-					break;
-				default:
-					result += fmt[ i ];
-					break;
+			let parsing = true;
+			while ( i < fmt.length && parsing ) {
+
+				switch ( fmt[ i ] ) {
+
+					case '-': leftAlign = true; i ++; break;
+					case '0': zeroPad = true; i ++; break;
+					case '+': plusSign = true; i ++; break;
+					case ' ': spaceSign = true; i ++; break;
+					case '#': i ++; break; // ignore # flag
+					default: parsing = false; break;
+
+				}
 
 			}
 
+			// Parse width
+			let width = 0;
+			while ( i < fmt.length && fmt[ i ] >= '0' && fmt[ i ] <= '9' ) {
+
+				width = width * 10 + ( fmt.charCodeAt( i ) - 48 );
+				i ++;
+
+			}
+
+			// Parse precision
+			let precision = - 1;
+			if ( i < fmt.length && fmt[ i ] === '.' ) {
+
+				i ++;
+				precision = 0;
+				while ( i < fmt.length && fmt[ i ] >= '0' && fmt[ i ] <= '9' ) {
+
+					precision = precision * 10 + ( fmt.charCodeAt( i ) - 48 );
+					i ++;
+
+				}
+
+			}
+
+			// Parse conversion specifier
+			let str = '';
+			if ( i < fmt.length ) {
+
+				switch ( fmt[ i ] ) {
+
+					case 's': {
+
+						const val = args[ argIdx ++ ];
+						str = val != null ? String( val ) : '';
+						if ( precision >= 0 && str.length > precision )
+							str = str.substring( 0, precision );
+						break;
+
+					}
+					case 'd':
+					case 'i': {
+
+						const val = args[ argIdx ++ ];
+						const num = Math.floor( Number( val ) );
+						const n = isNaN( num ) ? 0 : num;
+						str = String( Math.abs( n ) );
+						if ( n < 0 ) str = '-' + str;
+						else if ( plusSign ) str = '+' + str;
+						else if ( spaceSign ) str = ' ' + str;
+						break;
+
+					}
+					case 'f': {
+
+						const val = args[ argIdx ++ ];
+						const num = Number( val );
+						const n = isNaN( num ) ? 0.0 : num;
+						const prec = precision >= 0 ? precision : 6;
+						str = n.toFixed( prec );
+						if ( plusSign && n >= 0 ) str = '+' + str;
+						else if ( spaceSign && n >= 0 ) str = ' ' + str;
+						break;
+
+					}
+					case 'c': {
+
+						const val = args[ argIdx ++ ];
+						str = String.fromCharCode( val != null ? val : 0 );
+						break;
+
+					}
+					case '%':
+						str = '%';
+						break;
+					default:
+						str = fmt[ i ];
+						break;
+
+				}
+
+			}
+
+			// Apply width padding
+			if ( width > 0 && str.length < width ) {
+
+				const padChar = ( zeroPad && ! leftAlign ) ? '0' : ' ';
+				const padLen = width - str.length;
+				const padding = padChar.repeat( padLen );
+				if ( leftAlign ) {
+
+					str = str + padding;
+
+				} else {
+
+					// For zero-padded negative numbers, put '-' before zeros
+					if ( zeroPad && str.length > 0 && str[ 0 ] === '-' ) {
+
+						str = '-' + padding + str.substring( 1 );
+
+					} else {
+
+						str = padding + str;
+
+					}
+
+				}
+
+			}
+
+			result += str;
 			i ++;
 
 		} else {
