@@ -190,7 +190,7 @@ function SCR_DrawCenterString() {
 		for ( let j = 0; j < l; j ++ ) {
 
 			Draw_Character( x + j * 8, y, scr_centerstring.charCodeAt( start + j ) );
-			if ( -- remaining <= 0 )
+			if ( remaining -- === 0 )
 				return;
 
 		}
