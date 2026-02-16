@@ -18,7 +18,7 @@ Cvar_RegisterVariable(host_framerate);
 
 */
 
-import { Con_Printf } from './common.js';
+import { Con_Printf, Q_atof } from './common.js';
 import { Cmd_Exists, Cmd_Argc, Cmd_Argv } from './cmd.js';
 
 // Callback for broadcasting server cvar changes (injected to avoid circular deps)
@@ -76,7 +76,7 @@ export class cvar_t {
 		this.string = string || '';
 		this.archive = archive || false; // set to true to cause it to be saved to vars.rc
 		this.server = server || false; // notifies players when changed
-		this.value = parseFloat( this.string ) || 0;
+		this.value = Q_atof( this.string );
 		this.next = null;
 
 	}
@@ -115,7 +115,7 @@ export function Cvar_VariableValue( var_name ) {
 	const _var = Cvar_FindVar( var_name );
 	if ( ! _var )
 		return 0;
-	return parseFloat( _var.string ) || 0;
+	return Q_atof( _var.string );
 
 }
 
@@ -178,7 +178,7 @@ export function Cvar_Set( var_name, value ) {
 	const changed = ( _var.string !== value );
 
 	_var.string = value;
-	_var.value = parseFloat( _var.string ) || 0;
+	_var.value = Q_atof( _var.string );
 
 	if ( _var.server && changed ) {
 
@@ -248,7 +248,7 @@ export function Cvar_RegisterVariable( variable ) {
 	}
 
 	// parse the value
-	variable.value = parseFloat( variable.string ) || 0;
+	variable.value = Q_atof( variable.string );
 
 	// link the variable in
 	variable.next = cvar_vars;

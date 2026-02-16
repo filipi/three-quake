@@ -3,6 +3,7 @@
 import { Sys_Error } from './sys.js';
 import { Con_Printf, Con_DPrintf, COM_Parse, com_token } from './common.js';
 import { Cmd_AddCommand, Cmd_Argv } from './cmd.js';
+import { cvar_t, Cvar_RegisterVariable } from './cvar.js';
 import { PR_InitBuiltins } from './pr_cmds.js';
 import { CRC_Init, CRC_ProcessByte, CRC_Value } from './crc.js';
 import { MAX_EDICTS } from './quakedef.js';
@@ -53,17 +54,17 @@ let pr_extra_strings_offset = 0; // starting offset (set after progs load)
 // Cvar stubs (will be replaced when cvar system is connected)
 //============================================================================
 
-const nomonsters = { name: 'nomonsters', string: '0', value: 0 };
-const gamecfg = { name: 'gamecfg', string: '0', value: 0 };
-const scratch1 = { name: 'scratch1', string: '0', value: 0 };
-const scratch2 = { name: 'scratch2', string: '0', value: 0 };
-const scratch3 = { name: 'scratch3', string: '0', value: 0 };
-const scratch4 = { name: 'scratch4', string: '0', value: 0 };
-const savedgamecfg = { name: 'savedgamecfg', string: '0', value: 0 };
-const saved1 = { name: 'saved1', string: '0', value: 0 };
-const saved2 = { name: 'saved2', string: '0', value: 0 };
-const saved3 = { name: 'saved3', string: '0', value: 0 };
-const saved4 = { name: 'saved4', string: '0', value: 0 };
+const nomonsters = new cvar_t( 'nomonsters', '0' );
+const gamecfg = new cvar_t( 'gamecfg', '0' );
+const scratch1 = new cvar_t( 'scratch1', '0' );
+const scratch2 = new cvar_t( 'scratch2', '0' );
+const scratch3 = new cvar_t( 'scratch3', '0' );
+const scratch4 = new cvar_t( 'scratch4', '0' );
+const savedgamecfg = new cvar_t( 'savedgamecfg', '0', true );
+const saved1 = new cvar_t( 'saved1', '0', true );
+const saved2 = new cvar_t( 'saved2', '0', true );
+const saved3 = new cvar_t( 'saved3', '0', true );
+const saved4 = new cvar_t( 'saved4', '0', true );
 
 // Spawn flag constants
 const SPAWNFLAG_NOT_EASY = 256;
@@ -1273,6 +1274,18 @@ export function PR_Init() {
 	Cmd_AddCommand( 'edicts', ED_PrintEdicts );
 	Cmd_AddCommand( 'edictcount', ED_Count );
 	Cmd_AddCommand( 'profile', PR_Profile_f );
+
+	Cvar_RegisterVariable( nomonsters );
+	Cvar_RegisterVariable( gamecfg );
+	Cvar_RegisterVariable( scratch1 );
+	Cvar_RegisterVariable( scratch2 );
+	Cvar_RegisterVariable( scratch3 );
+	Cvar_RegisterVariable( scratch4 );
+	Cvar_RegisterVariable( savedgamecfg );
+	Cvar_RegisterVariable( saved1 );
+	Cvar_RegisterVariable( saved2 );
+	Cvar_RegisterVariable( saved3 );
+	Cvar_RegisterVariable( saved4 );
 
 	PR_InitBuiltins();
 

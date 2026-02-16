@@ -35,7 +35,7 @@ import {
 import { PR_RunError } from './pr_exec.js';
 import { SV_Move, SV_LinkEdict, SV_PointContents } from './world.js';
 import { SV_movestep, SV_CheckBottom, SV_MoveToGoal as SV_MoveToGoal_Real, SV_Move_SetCallbacks } from './sv_move.js';
-import { SV_StartSound, SV_StartParticle } from './sv_main.js';
+import { SV_StartSound, SV_StartParticle, sv_aim } from './sv_main.js';
 import { Cbuf_AddText } from './cmd.js';
 import { Cvar_VariableValue, Cvar_Set } from './cvar.js';
 import { FL_ONGROUND, FL_FLY, FL_SWIM, svs, ss_loading, ss_active } from './server.js';
@@ -1189,7 +1189,6 @@ Pick a vector for the player to shoot along
 vector aim(entity, missilespeed)
 =============
 */
-const sv_aim = { name: 'sv_aim', string: '0.93', value: 0.93 };
 const DAMAGE_AIM = 2;
 
 function PF_aim() {
