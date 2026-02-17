@@ -112,32 +112,6 @@ setInterval(() => {
 	console.error('[WATCHDOG] tick=' + watchdogCount + ' time=' + Math.floor(performance.now() / 1000));
 }, 5000);
 
-// Connection health monitor: detects stuck writers (writes that never complete)
-const WRITE_TIMEOUT_MS = 10000;  // 10 seconds
-
-function checkConnectionHealth() {
-	const now = Date.now();
-
-	for (let i = 0; i < svs.maxclients; i++) {
-		const client = svs.clients[i];
-		if (!client.active || !client.netconnection) continue;
-
-		const conn = client.netconnection.driverdata;
-		if (conn === null || conn === undefined) continue;
-
-		// Detect stuck writers
-		if (conn.pendingWrites > 0) {
-			const writeAge = now - conn.lastWriteTime;
-			if (writeAge > WRITE_TIMEOUT_MS) {
-				console.error('[Health] Client %d write timeout (%d pending, %dms stale)',
-					i, conn.pendingWrites, writeAge);
-				conn.connected = false;
-			}
-		}
-	}
-}
-
-setInterval(checkConnectionHealth, 5000);
 
 /**
  * Initialize the game server
