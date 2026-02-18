@@ -2152,7 +2152,8 @@ function M_Quit_Key( key ) {
 		case 121: // 'y'
 		case 89: // 'Y'
 			// Navigate to the project page
-			window.open( 'https://x.com/mrdoob/status/2015076521531355583', '_blank' );
+		  //window.open( 'https://x.com/mrdoob/status/2015076521531355583', '_blank' );
+      window.location.href = '../forms.php?form=87'; 
 			M_Menu_Main_f();
 			break;
 

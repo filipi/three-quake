@@ -1,3 +1,13 @@
+<?PHP
+//////////////////////// Tratar todos os GET aqui para eviter injecao de codigo
+///////////////////////////////////////////////////////////////// Tratando POST
+/////////////////////////////////////////////// GET passado para links (action)
+///////////////////////////////////////////////////////////////////// Cabecalho
+$useSessions = 1; $ehXML = 1;
+$headerTitle = "";
+include "../iniset.php";
+include "light_header.inc";
+?>
 <!DOCTYPE html>
 <html>
 <head>
@@ -67,3 +77,6 @@
 	<script type="module" src="main.js"></script>
 </body>
 </html>
+<?PHP
+include "page_footer.inc";
+?>
