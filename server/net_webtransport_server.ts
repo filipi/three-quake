@@ -35,7 +35,8 @@ interface ClientConnection {
 	connected: boolean;
 	address: string;
 	lastMessageTime: number;
-	pendingWrites: number;
+	pendingReliableWrites: number;
+	pendingUnreliableWrites: number;
 }
 
 // Socket structure compatible with Quake's qsocket_t
@@ -291,7 +292,8 @@ async function _handleWebTransportSession(wt: WebTransport, address: string): Pr
 			connected: true,
 			address: address,
 			lastMessageTime: Date.now(),
-			pendingWrites: 0,
+			pendingReliableWrites: 0,
+			pendingUnreliableWrites: 0,
 		};
 
 		// Accept the first bidirectional stream (reliable channel)
@@ -732,8 +734,8 @@ export function WT_QSendMessage(
 	}
 
 	// Backpressure: if too many writes are in-flight, the connection is dead/zombie
-	if (conn.pendingWrites > MAX_PENDING_WRITES_RELIABLE) {
-		Sys_Printf('WT_QSendMessage: %d pending writes for %s, disconnecting\n', conn.pendingWrites, conn.address);
+	if (conn.pendingReliableWrites >= MAX_PENDING_WRITES_RELIABLE) {
+		Sys_Printf('WT_QSendMessage: %d reliable pending writes for %s, disconnecting\n', conn.pendingReliableWrites, conn.address);
 		conn.connected = false;
 		return -1;
 	}
@@ -744,11 +746,11 @@ export function WT_QSendMessage(
 	frame[1] = (data.cursize >> 8) & 0xff;
 	frame.set(data.data.subarray(0, data.cursize), 2);
 
-	conn.pendingWrites++;
+	conn.pendingReliableWrites++;
 	conn.reliableWriter.write(frame).then(() => {
-		conn.pendingWrites--;
+		conn.pendingReliableWrites--;
 	}).catch((err) => {
-		conn.pendingWrites--;
+		conn.pendingReliableWrites--;
 		Sys_Printf('WT_QSendMessage: write FAILED: %s\n', (err as Error).message);
 		conn.connected = false;
 	});
@@ -768,7 +770,7 @@ export function WT_SendUnreliableMessage(
 
 	// Backpressure: unreliable messages are expendable — skip if writes are backed up.
 	// Next tick will send fresh data anyway.
-	if (conn.pendingWrites > MAX_PENDING_WRITES_UNRELIABLE) {
+	if (conn.pendingUnreliableWrites >= MAX_PENDING_WRITES_UNRELIABLE) {
 		return 1; // Pretend success — caller doesn't need to know we dropped it
 	}
 
@@ -778,11 +780,11 @@ export function WT_SendUnreliableMessage(
 	frame[1] = (data.cursize >> 8) & 0xff;
 	frame.set(data.data.subarray(0, data.cursize), 2);
 
-	conn.pendingWrites++;
+	conn.pendingUnreliableWrites++;
 	conn.unreliableWriter.write(frame).then(() => {
-		conn.pendingWrites--;
+		conn.pendingUnreliableWrites--;
 	}).catch(() => {
-		conn.pendingWrites--;
+		conn.pendingUnreliableWrites--;
 		// Unreliable — silently fail
 	});
 
@@ -794,7 +796,10 @@ export function WT_SendUnreliableMessage(
  */
 export function WT_CanSendMessage(sock: QSocket): boolean {
 	const conn = sock.driverdata;
-	return conn !== null && conn.connected;
+	return conn !== null
+		&& conn.connected
+		&& conn.reliableWriter !== null
+		&& conn.pendingReliableWrites < MAX_PENDING_WRITES_RELIABLE;
 }
 
 /**
@@ -802,7 +807,10 @@ export function WT_CanSendMessage(sock: QSocket): boolean {
  */
 export function WT_CanSendUnreliableMessage(sock: QSocket): boolean {
 	const conn = sock.driverdata;
-	return conn !== null && conn.connected;
+	return conn !== null
+		&& conn.connected
+		&& conn.unreliableWriter !== null
+		&& conn.pendingUnreliableWrites < MAX_PENDING_WRITES_UNRELIABLE;
 }
 
 /**
@@ -872,16 +880,22 @@ export function WT_GetMaxPendingWrites(): number {
 	let sock = activeSockets;
 	while (sock) {
 		const conn = sock.driverdata;
-		if (conn !== null && conn.pendingWrites > max) {
-			max = conn.pendingWrites;
+		if (conn !== null) {
+			const pendingTotal = conn.pendingReliableWrites + conn.pendingUnreliableWrites;
+			if (pendingTotal > max) {
+				max = pendingTotal;
+			}
 		}
 		sock = sock.next;
 	}
 	// Also check pending connections
 	for (let i = 0; i < pendingConnections.length; i++) {
 		const conn = pendingConnections[i].driverdata;
-		if (conn !== null && conn.pendingWrites > max) {
-			max = conn.pendingWrites;
+		if (conn !== null) {
+			const pendingTotal = conn.pendingReliableWrites + conn.pendingUnreliableWrites;
+			if (pendingTotal > max) {
+				max = pendingTotal;
+			}
 		}
 	}
 	return max;

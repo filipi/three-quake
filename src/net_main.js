@@ -679,6 +679,30 @@ export function NET_CanSendMessage( sock ) {
 
 /*
 ==================
+NET_CanSendUnreliableMessage
+
+Returns true or false if the given qsocket can currently accept an
+unreliable message to be transmitted.
+==================
+*/
+export function NET_CanSendUnreliableMessage( sock ) {
+
+	if ( ! sock )
+		return false;
+
+	if ( sock.disconnected )
+		return false;
+
+	SetNetTime();
+
+	const r = net_drivers[ sock.driver ].CanSendUnreliableMessage( sock );
+
+	return r;
+
+}
+
+/*
+==================
 NET_SendToAll
 
 This is a reliable *blocking* send to all attached clients.
