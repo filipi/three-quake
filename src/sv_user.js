@@ -35,7 +35,6 @@ const _clientthink_v_angle = new Float32Array( 3 );
 const _readclientmove_angle = new Float32Array( 3 );
 const _userfriction_start = new Float32Array( 3 );
 const _userfriction_stop = new Float32Array( 3 );
-const _unspawned_cmd = { forwardmove: 0, sidemove: 0, upmove: 0 };
 
 // world
 let angles = null; // float *
@@ -78,6 +77,18 @@ export function SV_User_SetCallbacks( callbacks ) {
 	if ( callbacks.host_client !== undefined ) host_client = callbacks.host_client;
 	if ( callbacks.set_host_client ) _set_host_client = callbacks.set_host_client;
 	if ( callbacks.get_key_dest ) _get_key_dest = callbacks.get_key_dest;
+
+}
+
+function SV_EnsureClientCmd( client ) {
+
+	if ( client.cmd == null ) {
+
+		client.cmd = { forwardmove: 0, sidemove: 0, upmove: 0 };
+
+	}
+
+	return client.cmd;
 
 }
 
@@ -666,11 +677,7 @@ export function SV_ReadClientMessage() {
 					return false;
 
 				case clc_move:
-					// Ensure cmd object exists before reading into it
-					if ( host_client.cmd == null ) {
-						host_client.cmd = { forwardmove: 0, sidemove: 0, upmove: 0 };
-					}
-					SV_ReadClientMove( host_client.cmd );
+					SV_ReadClientMove( SV_EnsureClientCmd( host_client ) );
 					break;
 
 			}
@@ -712,10 +719,10 @@ export function SV_RunClients() {
 		if ( ! host_client.spawned ) {
 
 			// clear client movement until a new packet is received
-			_unspawned_cmd.forwardmove = 0;
-			_unspawned_cmd.sidemove = 0;
-			_unspawned_cmd.upmove = 0;
-			host_client.cmd = _unspawned_cmd;
+			const hostCmd = SV_EnsureClientCmd( host_client );
+			hostCmd.forwardmove = 0;
+			hostCmd.sidemove = 0;
+			hostCmd.upmove = 0;
 			continue;
 
 		}
