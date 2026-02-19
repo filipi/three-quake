@@ -33,7 +33,7 @@ interface ClientConnection {
   } | null;
   reliableWriter: WritableStreamDefaultWriter<Uint8Array> | null;
   reliableReader: ReadableStreamDefaultReader<Uint8Array> | null;
-  datagramWriter: WritableStreamDefaultWriter<Uint8Array> | null;
+  datagramWritable: WritableStream<Uint8Array> | null;
   datagramReader: ReadableStreamDefaultReader<Uint8Array> | null;
   maxDatagramSize: number;
   pendingMessages: Array<{ reliable: boolean; data: Uint8Array }>;
@@ -44,6 +44,7 @@ interface ClientConnection {
   reliableWriteInFlight: boolean;
   unreliableQueuedPacket: Uint8Array | null;
   unreliableWriteInFlight: boolean;
+  outboundDatagramsEnabled: boolean;
   pendingReliableWrites: number;
   pendingUnreliableWrites: number;
 }
@@ -106,7 +107,7 @@ const MAX_PENDING_MESSAGES = 100;
 const MAX_PENDING_WRITES_UNRELIABLE = 2;
 const MAX_PENDING_WRITES_RELIABLE = 64;
 
-const USE_OUTBOUND_DATAGRAMS = true;
+const USE_OUTBOUND_DATAGRAMS: boolean = true;
 
 // Deno's datagram writer can deadlock/time out when writes overlap across
 // multiple client datagram writers in the same process. Serialize all outbound
@@ -120,6 +121,33 @@ let _unreliableGlobalWriteInFlight = false;
 // setTimeout(resolve, 0) ensures the game loop's setInterval gets a chance to fire.
 function _yieldAfterRead(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function _isTimeoutLikeError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return msg.includes("timed out") || msg.includes("timeout");
+}
+
+function _disableOutboundDatagrams(
+  conn: ClientConnection,
+  reason: string,
+): void {
+  if (conn.outboundDatagramsEnabled === false) {
+    return;
+  }
+
+  conn.outboundDatagramsEnabled = false;
+  conn.unreliableQueuedPacket = null;
+  conn.unreliableWriteInFlight = false;
+  conn.datagramWritable = null;
+  _unreliableReadySet.delete(conn.id);
+
+  _updatePendingWriteCounts(conn);
+  Sys_Printf(
+    "WT_SendUnreliableMessage: disabling outbound datagrams for %s (%s)\n",
+    conn.address,
+    reason,
+  );
 }
 
 // Callback for socket allocation (injected from game_server.js)
@@ -312,7 +340,7 @@ async function _handleWebTransportSession(
       reliableStream: null,
       reliableWriter: null,
       reliableReader: null,
-      datagramWriter: null,
+      datagramWritable: null,
       datagramReader: null,
       maxDatagramSize: 0,
       pendingMessages: [],
@@ -323,6 +351,7 @@ async function _handleWebTransportSession(
       reliableWriteInFlight: false,
       unreliableQueuedPacket: null,
       unreliableWriteInFlight: false,
+      outboundDatagramsEnabled: true,
       pendingReliableWrites: 0,
       pendingUnreliableWrites: 0,
     };
@@ -349,7 +378,7 @@ async function _handleWebTransportSession(
       wt.close();
       return;
     }
-    clientConn.datagramWriter = datagrams.writable.getWriter();
+    clientConn.datagramWritable = datagrams.writable;
     clientConn.datagramReader = datagrams.readable.getReader();
     const maxDatagramSize = datagrams.maxDatagramSize;
     if (typeof maxDatagramSize === "number") {
@@ -443,7 +472,20 @@ function _startBackgroundReaders(
   (async () => {
     try {
       while (conn.connected && conn.datagramReader) {
-        const { value, done } = await conn.datagramReader.read();
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await conn.datagramReader.read();
+        } catch (error) {
+          if (_isTimeoutLikeError(error)) {
+            // WebTransport datagram reads can timeout when no moves arrive yet.
+            // Keep the connection alive and continue polling.
+            await _yieldAfterRead();
+            continue;
+          }
+          throw error;
+        }
+
+        const { value, done } = result;
         if (done) break;
         if (value === undefined || value.length === 0) {
           // Some runtimes can surface empty datagrams repeatedly.
@@ -542,14 +584,14 @@ async function _readExact(
   n: number,
 ): Promise<Uint8Array | null> {
   const buf = _getReaderBuffer(reader);
-  const result = new Uint8Array(n);
+  const output = new Uint8Array(n);
   let offset = 0;
 
   // Drain leftover bytes from previous read
   if (buf.data !== null) {
     const available = buf.data.length - buf.offset;
     const bytesToCopy = Math.min(available, n);
-    result.set(buf.data.subarray(buf.offset, buf.offset + bytesToCopy), 0);
+    output.set(buf.data.subarray(buf.offset, buf.offset + bytesToCopy), 0);
     offset = bytesToCopy;
     buf.offset += bytesToCopy;
 
@@ -561,12 +603,23 @@ async function _readExact(
 
   // Read from stream until we have n bytes
   while (offset < n) {
-    const { value, done } = await reader.read();
+    let readResult: ReadableStreamReadResult<Uint8Array>;
+    try {
+      readResult = await reader.read();
+    } catch (error) {
+      if (_isTimeoutLikeError(error)) {
+        await _yieldAfterRead();
+        continue;
+      }
+      throw error;
+    }
+
+    const { value, done } = readResult;
     if (done) return null;
     if (value === undefined || value.length === 0) return null;
 
     const bytesToCopy = Math.min(value.length, n - offset);
-    result.set(value.subarray(0, bytesToCopy), offset);
+    output.set(value.subarray(0, bytesToCopy), offset);
     offset += bytesToCopy;
 
     // Save leftover bytes for next call
@@ -576,7 +629,7 @@ async function _readExact(
     }
   }
 
-  return result;
+  return output;
 }
 
 /**
@@ -659,6 +712,8 @@ function _handleConnectionDeath(sock: QSocket, conn: ClientConnection): void {
   conn.unreliableQueuedPacket = null;
   conn.reliableWriteInFlight = false;
   conn.unreliableWriteInFlight = false;
+  conn.outboundDatagramsEnabled = false;
+  conn.datagramWritable = null;
   conn.pendingReliableWrites = 0;
   conn.pendingUnreliableWrites = 0;
   _unreliableReadySet.delete(conn.id);
@@ -796,7 +851,14 @@ export function WT_QGetMessage(sock: QSocket): number {
 function _updatePendingWriteCounts(conn: ClientConnection): void {
   conn.pendingReliableWrites = conn.reliableWriteQueue.length +
     (conn.reliableWriteInFlight ? 1 : 0);
-  conn.pendingUnreliableWrites = (conn.unreliableWriteInFlight ? 1 : 0) +
+
+  if (conn.outboundDatagramsEnabled === false || conn.datagramWritable === null) {
+    conn.pendingUnreliableWrites = 0;
+    return;
+  }
+
+  conn.pendingUnreliableWrites =
+    (conn.unreliableWriteInFlight ? 1 : 0) +
     (conn.unreliableQueuedPacket !== null ? 1 : 0);
 }
 
@@ -847,7 +909,8 @@ function _pumpReliableWrites(conn: ClientConnection): void {
 
 function _enqueueUnreliableConn(conn: ClientConnection): void {
   if (
-    !conn.connected || conn.datagramWriter === null ||
+    !conn.connected || conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null ||
     conn.unreliableQueuedPacket === null
   ) {
     return;
@@ -867,7 +930,8 @@ function _dequeueUnreliableConn(): ClientConnection | null {
     _unreliableReadySet.delete(conn.id);
 
     if (
-      !conn.connected || conn.datagramWriter === null ||
+      !conn.connected || conn.outboundDatagramsEnabled === false ||
+      conn.datagramWritable === null ||
       conn.unreliableQueuedPacket === null
     ) {
       continue;
@@ -902,18 +966,39 @@ function _pumpUnreliableWrites(): void {
       conn.unreliableWriteInFlight = true;
       _updatePendingWriteCounts(conn);
 
+      let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
       try {
-        await conn.datagramWriter!.write(packet);
-      } catch {
-        // Unreliable channel failed - mark disconnected so cleanup path runs.
-        conn.connected = false;
+        if (conn.datagramWritable === null) {
+          _disableOutboundDatagrams(conn, "datagram channel unavailable");
+        } else {
+          writer = conn.datagramWritable.getWriter();
+          await writer.write(packet);
+        }
+      } catch (error) {
+        // Unreliable channel write timeouts are observed in Deno under load.
+        // Downgrade this connection to reliable-only instead of hard drop.
+        if (_isTimeoutLikeError(error)) {
+          _disableOutboundDatagrams(conn, "timeout");
+        } else {
+          _disableOutboundDatagrams(conn, String(error));
+        }
+      } finally {
+        if (writer !== null) {
+          try {
+            writer.releaseLock();
+          } catch {
+            // ignore
+          }
+        }
       }
 
       conn.unreliableWriteInFlight = false;
       _updatePendingWriteCounts(conn);
 
       if (
-        conn.connected && conn.datagramWriter !== null &&
+        conn.connected &&
+        conn.outboundDatagramsEnabled &&
+        conn.datagramWritable !== null &&
         conn.unreliableQueuedPacket !== null
       ) {
         _enqueueUnreliableConn(conn);
@@ -975,9 +1060,13 @@ export function WT_SendUnreliableMessage(
   data: { data: Uint8Array; cursize: number },
 ): number {
   const conn = sock.driverdata;
-  if (!conn || !conn.connected || !conn.datagramWriter) return -1;
+  if (!conn || !conn.connected) return -1;
 
-  if (USE_OUTBOUND_DATAGRAMS === false) {
+  if (
+    USE_OUTBOUND_DATAGRAMS === false ||
+    conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null
+  ) {
     return WT_QSendMessage(sock, data);
   }
 
@@ -1012,14 +1101,21 @@ export function WT_CanSendMessage(sock: QSocket): boolean {
  * Check if we can send an unreliable message
  */
 export function WT_CanSendUnreliableMessage(sock: QSocket): boolean {
-  if (USE_OUTBOUND_DATAGRAMS === false) {
+  const conn = sock.driverdata;
+  if (conn === null || conn.connected === false) {
+    return false;
+  }
+
+  if (
+    USE_OUTBOUND_DATAGRAMS === false ||
+    conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null
+  ) {
     return WT_CanSendMessage(sock);
   }
 
-  const conn = sock.driverdata;
   return conn !== null &&
-    conn.connected &&
-    conn.datagramWriter !== null &&
+    conn.datagramWritable !== null &&
     !(conn.unreliableWriteInFlight && conn.unreliableQueuedPacket !== null) &&
     conn.pendingUnreliableWrites < MAX_PENDING_WRITES_UNRELIABLE;
 }
@@ -1036,6 +1132,7 @@ export function WT_Close(sock: QSocket): void {
   conn.unreliableQueuedPacket = null;
   conn.reliableWriteInFlight = false;
   conn.unreliableWriteInFlight = false;
+  conn.outboundDatagramsEnabled = false;
   conn.pendingReliableWrites = 0;
   conn.pendingUnreliableWrites = 0;
   _unreliableReadySet.delete(conn.id);
@@ -1056,10 +1153,7 @@ export function WT_Close(sock: QSocket): void {
       conn.reliableWriter.close().catch(() => {});
       conn.reliableWriter = null;
     }
-    if (conn.datagramWriter) {
-      conn.datagramWriter.releaseLock();
-      conn.datagramWriter = null;
-    }
+    conn.datagramWritable = null;
     conn.webTransport.close();
   } catch {
     // Ignore errors during close

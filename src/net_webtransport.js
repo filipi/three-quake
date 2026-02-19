@@ -20,6 +20,12 @@ let wt_initialized = false;
 // This should be long enough for slow connections but short enough to not hang indefinitely
 const ROOM_JOIN_TIMEOUT_MS = 10000; // 10 seconds
 
+// Deno's WebTransport datagram receive path can wedge room processes when many
+// rooms/clients send clc_move over datagrams concurrently. Keep client->server
+// traffic on the reliable stream for stability, while still receiving server
+// datagrams for entity updates.
+const USE_CLIENT_OUTBOUND_DATAGRAMS = false;
+
 // Active connections
 const wt_connections = new Map(); // qsocket_t -> WebTransportConnection
 
@@ -539,6 +545,16 @@ export async function WT_Connect( host ) {
 
 	Con_Printf( 'WebTransport connecting to ' + url + ( roomId ? ' (room: ' + roomId + ')' : '' ) + '\n' );
 
+	// Direct room server connection (no lobby join parameter) should not
+	// open an initial throwaway transport. Doing so creates a ghost server
+	// client that times out later and can wedge unreliable datagram sends.
+	if ( roomId == null ) {
+
+		Con_Printf( 'No room ID, using direct connection\n' );
+		return await _WT_ConnectDirect( url, host );
+
+	}
+
 	try {
 
 		// Create the WebTransport connection
@@ -677,14 +693,7 @@ export async function WT_Connect( host ) {
 
 		}
 
-		// No room ID - connect directly using game transport protocol
-		// (This path is for direct server connections without lobby)
-		Con_Printf( 'No room ID, using direct connection\n' );
-		transport.close();
-		NET_FreeQSocket( sock );
-		return await _WT_ConnectDirect( url, host );
-
-	} catch ( error ) {
+		} catch ( error ) {
 
 		Con_Printf( 'WebTransport connect failed: ' + error.message + '\n' );
 
@@ -1188,6 +1197,13 @@ export function WT_SendUnreliableMessage( sock, data ) {
 
 	}
 
+	// Stability fallback: send client commands on reliable stream.
+	if ( USE_CLIENT_OUTBOUND_DATAGRAMS !== true ) {
+
+		return WT_QSendMessage( sock, data );
+
+	}
+
 	if ( conn.datagramWriter == null ) {
 
 		Con_DPrintf( 'WT_SendUnreliableMessage: no datagramWriter\n' );
@@ -1243,6 +1259,12 @@ export function WT_CanSendUnreliableMessage( sock ) {
 
 	const conn = sock.driverdata;
 	if ( ! conn ) return false;
+
+	if ( USE_CLIENT_OUTBOUND_DATAGRAMS !== true ) {
+
+		return WT_CanSendMessage( sock );
+
+	}
 
 	return conn.connected && conn.datagramWriter != null;
 
