@@ -242,19 +242,29 @@ Returns the sequence number, or -1 if not found.
 =================
 */
 export function CL_FindAcknowledgedSequence( currentTime ) {
+	// Conservative ack estimate:
+	// 1) only consider commands old enough to have likely completed a round trip
+	// 2) never regress
+	// 3) never jump past the newest command we have sent
+	const newestSent = outgoing_sequence - 1;
+	if ( newestSent <= incoming_sequence )
+		return - 1;
 
-	// Measure latency: find the most recent command we sent before
-	// this server update. The time between sending that command and
-	// receiving the server response approximates RTT + server tick.
-	const searchStart = outgoing_sequence - 1;
-	const searchEnd = Math.max( 0, outgoing_sequence - UPDATE_BACKUP + 1 );
+	// Require a minimum age before assuming the server has processed a command.
+	// Without this guard, high send rates can incorrectly "ack" the newest command
+	// every frame, collapsing prediction.
+	let minAckAge = cls_latency > 0 ? cls_latency : 0.1;
+	if ( minAckAge < 0.02 ) minAckAge = 0.02;
+	if ( minAckAge > 1.0 ) minAckAge = 1.0;
+	const ackCutoffTime = currentTime - minAckAge;
 
-	// The most recently sent command before this server response
 	let bestSeq = - 1;
+	const searchStart = newestSent;
+	const searchEnd = Math.max( incoming_sequence + 1, outgoing_sequence - UPDATE_BACKUP + 1 );
 	for ( let seq = searchStart; seq >= searchEnd; seq -- ) {
 
 		const frame = frames[ seq & UPDATE_MASK ];
-		if ( frame.senttime > 0 && frame.senttime <= currentTime ) {
+		if ( frame.senttime > 0 && frame.senttime <= ackCutoffTime ) {
 
 			bestSeq = seq;
 			break;
@@ -263,35 +273,38 @@ export function CL_FindAcknowledgedSequence( currentTime ) {
 
 	}
 
-	// If we didn't find anything but have commands in flight,
-	// acknowledge at least some to prevent buffer overflow
-	if ( bestSeq < 0 && outgoing_sequence > UPDATE_BACKUP / 2 ) {
+	// Startup fallback: if latency estimate is still settling, advance by at most one
+	// command that has at least been sent before now.
+	if ( bestSeq < 0 ) {
 
-		bestSeq = outgoing_sequence - UPDATE_BACKUP / 2;
+		const nextSeq = incoming_sequence + 1;
+		if ( nextSeq <= newestSent ) {
+
+			const nextFrame = frames[ nextSeq & UPDATE_MASK ];
+			if ( nextFrame.senttime > 0 && nextFrame.senttime <= currentTime )
+				bestSeq = nextSeq;
+
+		}
 
 	}
 
-	// Update latency from the oldest unacknowledged command
-	// This command was sent before the server generated this response,
-	// so (currentTime - senttime) >= true RTT
-	if ( bestSeq >= 0 ) {
+	if ( bestSeq <= incoming_sequence )
+		return - 1;
 
-		const ackFrame = frames[ bestSeq & UPDATE_MASK ];
-		if ( ackFrame.senttime > 0 ) {
+	const ackFrame = frames[ bestSeq & UPDATE_MASK ];
+	if ( ackFrame.senttime > 0 ) {
 
-			const observedRTT = currentTime - ackFrame.senttime;
-			if ( observedRTT >= 0 && observedRTT < 2.0 ) {
+		const observedRTT = currentTime - ackFrame.senttime;
+		if ( observedRTT >= 0 && observedRTT < 2.0 ) {
 
-				// Exponential moving average
-				if ( cls_latency <= 0 ) {
+			// Exponential moving average
+			if ( cls_latency <= 0 ) {
 
-					cls_latency = observedRTT;
+				cls_latency = observedRTT;
 
-				} else {
+			} else {
 
-					cls_latency = cls_latency * 0.75 + observedRTT * 0.25;
-
-				}
+				cls_latency = cls_latency * 0.75 + observedRTT * 0.25;
 
 			}
 
