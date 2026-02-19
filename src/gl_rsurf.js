@@ -30,7 +30,8 @@ function createQuakeLightmapMaterial( diffuseMap, lightmapTex ) {
 	return new THREE.MeshLambertMaterial( matOptions );
 
 }
-import { cl, cl_dlights } from './client.js';
+import { cl, cl_dlights, MAX_VISEDICTS, cl_visedicts, cl_numvisedicts, set_cl_numvisedicts } from './client.js';
+import { R_StoreEfrags } from './gl_refrag.js';
 import {
 	r_refdef, r_origin, vpn, vright, vup
 } from './render.js';
@@ -1567,7 +1568,11 @@ export function R_RecursiveWorldNode( node ) {
 		}
 
 		// deal with model fragments in this leaf
-		// if (pleaf.efrags) R_StoreEfrags(&pleaf.efrags);
+		if ( pleaf.efrags ) {
+
+			set_cl_numvisedicts( R_StoreEfrags( pleaf.efrags, cl_visedicts, cl_numvisedicts, MAX_VISEDICTS, r_framecount ) );
+
+		}
 
 		return;
 

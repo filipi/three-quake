@@ -14,9 +14,9 @@ import { clc_disconnect, clc_stringcmd } from './protocol.js';
 import { CL_GetMessage, CL_PlayDemo_f, CL_StopPlayback, CL_Stop_f } from './cl_demo.js';
 import { CL_ParseServerMessage } from './cl_parse.js';
 import { SIGNONS, MAX_DLIGHTS, MAX_EFRAGS, MAX_BEAMS, MAX_TEMP_ENTITIES,
-	MAX_STATIC_ENTITIES, MAX_DEMOS, MAX_VISEDICTS,
+	MAX_DEMOS, MAX_VISEDICTS,
 	ca_dedicated, ca_disconnected, ca_connected,
-	cl, cls, cl_efrags, cl_entities, cl_static_entities,
+	cl, cls, cl_efrags, cl_entities,
 	cl_lightstyle, cl_dlights, cl_temp_entities, cl_beams,
 	cl_numvisedicts, cl_visedicts, set_cl_numvisedicts,
 	dlight_t, entity_t, efrag_t, lightstyle_t, beam_t,
@@ -956,16 +956,6 @@ export function CL_RelinkEntities() {
 	const frac = CL_LerpPoint();
 
 	set_cl_numvisedicts( 0 );
-
-	// Add static entities (torches, flames, etc.) to visedicts.
-	// Bypasses the unimplemented efrag system — safe because r_novis=1.
-	for ( let i = 0; i < cl.num_statics; i ++ ) {
-		if ( cl_numvisedicts >= MAX_VISEDICTS ) break;
-		const ent = cl_static_entities[ i ];
-		if ( ent.model == null ) continue;
-		cl_visedicts[ cl_numvisedicts ] = ent;
-		set_cl_numvisedicts( cl_numvisedicts + 1 );
-	}
 
 	//
 	// interpolate player info
