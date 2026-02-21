@@ -1,67 +1,80 @@
 // WebTransport server driver for Deno
 // Handles incoming client connections via WebTransport/HTTP3
 
-import { Sys_Printf } from './sys_server.ts';
-import { net_message } from '../src/net.js';
+import { Sys_Printf } from "./sys_server.ts";
+import { net_message } from "../src/net.js";
 
 // Server configuration
 let serverPort = 4433;
-let certFile = 'cert.pem';
-let keyFile = 'key.pem';
+let certFile = "cert.pem";
+let keyFile = "key.pem";
 
 // DEPRECATED: These functions are no longer used with multi-process architecture
 // Kept for backwards compatibility with game_server.js but they do nothing
 export function WT_SetDirectMode(_enabled: boolean): void {}
 export function WT_SetMapCallbacks(
-	_changeMap: (mapName: string) => Promise<void>,
-	_getCurrentMap: () => string
+  _changeMap: (mapName: string) => Promise<void>,
+  _getCurrentMap: () => string,
 ): void {}
-export function WT_SetMaxClientsCallback(_setMaxClients: (maxClients: number) => void): void {}
+export function WT_SetMaxClientsCallback(
+  _setMaxClients: (maxClients: number) => void,
+): void {}
 
 // Connection tracking
-// Two QUIC bidirectional streams per connection:
-// Stream 1 (reliable) for signon data, stringcmds, name/frag changes
-// Stream 2 (unreliable) for entity updates, clientdata, clc_move
+// Transport protocol:
+// - Reliable bidirectional stream for signon data, stringcmds, name/frag changes
+// - Unreliable WebTransport datagrams for entity updates, clientdata, clc_move
+// - Game payloads may be prefixed with transport sequencing header:
+//   [magic:1][sequence:4][ack:4][quake_payload...]
 interface ClientConnection {
-	id: number;
-	webTransport: WebTransport;
-	bidirectionalStream: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } | null;
-	reliableWriter: WritableStreamDefaultWriter<Uint8Array> | null;
-	reliableReader: ReadableStreamDefaultReader<Uint8Array> | null;
-	unreliableStream: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } | null;
-	unreliableWriter: WritableStreamDefaultWriter<Uint8Array> | null;
-	unreliableReader: ReadableStreamDefaultReader<Uint8Array> | null;
-	pendingMessages: Array<{ reliable: boolean; data: Uint8Array }>;
-	connected: boolean;
-	address: string;
-	lastMessageTime: number;
-	pendingWrites: number;
+  id: number;
+  webTransport: WebTransport;
+  reliableStream: {
+    readable: ReadableStream<Uint8Array>;
+    writable: WritableStream<Uint8Array>;
+  } | null;
+  reliableWriter: WritableStreamDefaultWriter<Uint8Array> | null;
+  reliableReader: ReadableStreamDefaultReader<Uint8Array> | null;
+  datagramWritable: WritableStream<Uint8Array> | null;
+  datagramReader: ReadableStreamDefaultReader<Uint8Array> | null;
+  maxDatagramSize: number;
+  pendingMessages: Array<{ reliable: boolean; data: Uint8Array }>;
+  connected: boolean;
+  address: string;
+  lastMessageTime: number;
+  reliableWriteQueue: Uint8Array[];
+  reliableWriteInFlight: boolean;
+  unreliableQueuedPacket: Uint8Array | null;
+  unreliableWriteInFlight: boolean;
+  outboundDatagramsEnabled: boolean;
+  pendingReliableWrites: number;
+  pendingUnreliableWrites: number;
 }
 
 // Socket structure compatible with Quake's qsocket_t
 export interface QSocket {
-	next: QSocket | null;
-	connecttime: number;
-	lastMessageTime: number;
-	lastSendTime: number;
-	disconnected: boolean;
-	canSend: boolean;
-	sendNext: boolean;
-	driver: number;
-	landriver: number;
-	socket: number;
-	driverdata: ClientConnection | null;
-	ackSequence: number;
-	sendSequence: number;
-	unreliableSendSequence: number;
-	sendMessageLength: number;
-	sendMessage: Uint8Array;
-	receiveSequence: number;
-	unreliableReceiveSequence: number;
-	receiveMessageLength: number;
-	receiveMessage: Uint8Array;
-	addr: unknown;
-	address: string;
+  next: QSocket | null;
+  connecttime: number;
+  lastMessageTime: number;
+  lastSendTime: number;
+  disconnected: boolean;
+  canSend: boolean;
+  sendNext: boolean;
+  driver: number;
+  landriver: number;
+  socket: number;
+  driverdata: ClientConnection | null;
+  ackSequence: number;
+  sendSequence: number;
+  unreliableSendSequence: number;
+  sendMessageLength: number;
+  sendMessage: Uint8Array;
+  receiveSequence: number;
+  unreliableReceiveSequence: number;
+  receiveMessageLength: number;
+  receiveMessage: Uint8Array;
+  addr: unknown;
+  address: string;
 }
 
 // Active sockets
@@ -88,19 +101,113 @@ const NET_MAXMESSAGE = 8192;
 const MAX_PENDING_MESSAGES = 100;
 
 // Write backpressure limits.
-// When writer.write() is called without await, each call queues a write promise.
-// If the client's network is slow/congested, these pile up unbounded, causing:
-// - Memory growth (each promise + Uint8Array frame stays alive until resolved)
-// - QUIC stack CPU spike (processing the massive write queue)
-// - Event loop starvation (same pattern as the datagram freeze from commit 82520e3)
-const MAX_PENDING_WRITES_UNRELIABLE = 32;  // Expendable — skip and send fresh data next tick
-const MAX_PENDING_WRITES_RELIABLE = 64;    // Critical — if this backed up, connection is dead
+// Deno's WebTransport datagram writer appears unstable with concurrent writes on
+// the same writer. We enforce strict single-flight writes:
+// - Reliable: queued and written in order, one in-flight write at a time.
+// - Unreliable: globally serialized per room process (across all clients) with
+//   one queued "latest" datagram per connection.
+const MAX_PENDING_WRITES_UNRELIABLE = 2;
+const MAX_PENDING_WRITES_RELIABLE = 64;
+const WT_PACKET_MAGIC = 0x71;
+const WT_PACKET_HEADER_BYTES = 9; // [magic:u8][sequence:u32][acknowledged:u32]
+
+const USE_OUTBOUND_DATAGRAMS: boolean = true;
+
+// Deno's datagram writer can deadlock/time out when writes overlap across
+// multiple client datagram writers in the same process. Serialize all outbound
+// datagram writes globally per room process.
+const _unreliableReadyQueue: ClientConnection[] = [];
+const _unreliableReadySet = new Set<number>();
+let _unreliableGlobalWriteInFlight = false;
 
 // Yield to the macrotask queue so setInterval (game loop) can run.
 // reader.read() resolves via microtasks which can cascade without yielding.
 // setTimeout(resolve, 0) ensures the game loop's setInterval gets a chance to fire.
 function _yieldAfterRead(): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, 0));
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function _isTimeoutLikeError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return msg.includes("timed out") || msg.includes("timeout");
+}
+
+function _isNewerSequence(sequence: number, current: number): boolean {
+  return (((sequence - current) | 0) > 0);
+}
+
+function _buildSequencedPacket(
+  sock: QSocket,
+  data: Uint8Array,
+  dataLength: number,
+  forceHeader = false,
+): Uint8Array {
+  if (!forceHeader && (sock.receiveSequence | 0) < 0) {
+    const legacyPacket = new Uint8Array(dataLength);
+    legacyPacket.set(data.subarray(0, dataLength), 0);
+    return legacyPacket;
+  }
+
+  const packet = new Uint8Array(WT_PACKET_HEADER_BYTES + dataLength);
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+
+  const sequence = sock.sendSequence | 0;
+  const acknowledged = sock.receiveSequence | 0;
+
+  packet[0] = WT_PACKET_MAGIC;
+  view.setUint32(1, sequence >>> 0, true);
+  view.setUint32(5, acknowledged >>> 0, true);
+  packet.set(data.subarray(0, dataLength), WT_PACKET_HEADER_BYTES);
+
+  sock.sendSequence = (sequence + 1) | 0;
+
+  return packet;
+}
+
+function _parseSequencedPacket(
+  sock: QSocket,
+  packet: Uint8Array,
+): Uint8Array | null {
+  if (packet.length < WT_PACKET_HEADER_BYTES || packet[0] !== WT_PACKET_MAGIC) {
+    return packet;
+  }
+
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+  const sequence = view.getUint32(1, true) | 0;
+  const acknowledged = view.getUint32(5, true) | 0;
+
+  if (_isNewerSequence(acknowledged, sock.ackSequence | 0)) {
+    sock.ackSequence = acknowledged;
+  }
+
+  if (_isNewerSequence(sequence, sock.receiveSequence | 0) === false) {
+    return null;
+  }
+
+  sock.receiveSequence = sequence;
+  return packet.subarray(WT_PACKET_HEADER_BYTES);
+}
+
+function _disableOutboundDatagrams(
+  conn: ClientConnection,
+  reason: string,
+): void {
+  if (conn.outboundDatagramsEnabled === false) {
+    return;
+  }
+
+  conn.outboundDatagramsEnabled = false;
+  conn.unreliableQueuedPacket = null;
+  conn.unreliableWriteInFlight = false;
+  conn.datagramWritable = null;
+  _unreliableReadySet.delete(conn.id);
+
+  _updatePendingWriteCounts(conn);
+  Sys_Printf(
+    "WT_SendUnreliableMessage: disabling outbound datagrams for %s (%s)\n",
+    conn.address,
+    reason,
+  );
 }
 
 // Callback for socket allocation (injected from game_server.js)
@@ -112,319 +219,379 @@ let _NET_FreeQSocket: ((sock: QSocket) => void) | null = null;
  * Set the socket allocator callback
  */
 export function WT_SetSocketAllocator(allocator: () => QSocket | null): void {
-	_NET_NewQSocket = allocator;
+  _NET_NewQSocket = allocator;
 }
 
 /**
  * Set the socket freer callback
  */
 export function WT_SetSocketFreer(freer: (sock: QSocket) => void): void {
-	_NET_FreeQSocket = freer;
+  _NET_FreeQSocket = freer;
 }
 
 /**
  * Initialize the WebTransport server driver
  */
 export function WT_Init(): number {
-	Sys_Printf('WebTransport server driver initialized\n');
-	return 0;
+  Sys_Printf("WebTransport server driver initialized\n");
+  return 0;
 }
 
 /**
  * Shutdown the WebTransport server driver
  */
 export function WT_Shutdown(): void {
-	Sys_Printf('WebTransport server driver shutting down\n');
+  Sys_Printf("WebTransport server driver shutting down\n");
 
-	if (quicEndpoint) {
-		quicEndpoint.close();
-		quicEndpoint = null;
-	}
+  _unreliableReadyQueue.length = 0;
+  _unreliableReadySet.clear();
+  _unreliableGlobalWriteInFlight = false;
 
-	// Close all connections
-	let sock = activeSockets;
-	while (sock) {
-		if (sock.driverdata) {
-			try {
-				sock.driverdata.webTransport.close();
-			} catch {
-				// Ignore errors during shutdown
-			}
-		}
-		sock = sock.next;
-	}
+  if (quicEndpoint) {
+    quicEndpoint.close();
+    quicEndpoint = null;
+  }
+
+  // Close all connections
+  let sock = activeSockets;
+  while (sock) {
+    if (sock.driverdata) {
+      try {
+        sock.driverdata.webTransport.close();
+      } catch {
+        // Ignore errors during shutdown
+      }
+    }
+    sock = sock.next;
+  }
 }
 
 // Store cert/key for listen()
-let serverCert = '';
-let serverKey = '';
+let serverCert = "";
+let serverKey = "";
 
 /**
  * Start or stop listening for connections
  */
 export async function WT_Listen(state: boolean): Promise<void> {
-	if (state) {
-		if (quicEndpoint) return; // Already listening
+  if (state) {
+    if (quicEndpoint) return; // Already listening
 
-		try {
-			// Read TLS certificate and key
-			serverCert = await Deno.readTextFile(certFile);
-			serverKey = await Deno.readTextFile(keyFile);
+    try {
+      // Read TLS certificate and key
+      serverCert = await Deno.readTextFile(certFile);
+      serverKey = await Deno.readTextFile(keyFile);
 
-			// Create QUIC endpoint
-			quicEndpoint = new Deno.QuicEndpoint({
-				hostname: '0.0.0.0',
-				port: serverPort,
-			});
+      // Create QUIC endpoint
+      quicEndpoint = new Deno.QuicEndpoint({
+        hostname: "0.0.0.0",
+        port: serverPort,
+      });
 
-			Sys_Printf('WebTransport server listening on port ' + serverPort + '\n');
+      Sys_Printf("WebTransport server listening on port " + serverPort + "\n");
 
-			// Start accepting connections in background
-			_acceptConnections();
-		} catch (error) {
-			Sys_Printf(
-				'Failed to start WebTransport listener: ' +
-					(error as Error).message +
-					'\n'
-			);
-		}
-	} else {
-		if (quicEndpoint) {
-			quicEndpoint.close();
-			quicEndpoint = null;
-			Sys_Printf('WebTransport server stopped listening\n');
-		}
-	}
+      // Start accepting connections in background
+      _acceptConnections();
+    } catch (error) {
+      Sys_Printf(
+        "Failed to start WebTransport listener: " +
+          (error as Error).message +
+          "\n",
+      );
+    }
+  } else {
+    if (quicEndpoint) {
+      quicEndpoint.close();
+      quicEndpoint = null;
+      Sys_Printf("WebTransport server stopped listening\n");
+    }
+  }
 }
 
 /**
  * Background task to accept incoming connections
  */
 async function _acceptConnections(): Promise<void> {
-	if (!quicEndpoint) return;
+  if (!quicEndpoint) return;
 
-	try {
-		// Get listener from endpoint with TLS options
-		const listener = quicEndpoint.listen({
-			cert: serverCert,
-			key: serverKey,
-			alpnProtocols: ['h3'], // HTTP/3 for WebTransport
-		});
+  try {
+    // Get listener from endpoint with TLS options
+    const listener = quicEndpoint.listen({
+      cert: serverCert,
+      key: serverKey,
+      alpnProtocols: ["h3"], // HTTP/3 for WebTransport
+    });
 
-		// Accept connections using listener.accept() which returns QuicConn directly
-		while (quicEndpoint) {
-			try {
-				// Use listener.accept() to get QuicConn directly
-				const conn = await listener.accept();
+    // Accept connections using listener.accept() which returns QuicConn directly
+    while (quicEndpoint) {
+      try {
+        // Use listener.accept() to get QuicConn directly
+        const conn = await listener.accept();
 
-				const remoteAddr = conn.remoteAddr;
-				const address = remoteAddr.hostname + ':' + remoteAddr.port;
-				Sys_Printf('Connection from ' + address + '\n');
+        const remoteAddr = conn.remoteAddr;
+        const address = remoteAddr.hostname + ":" + remoteAddr.port;
+        Sys_Printf("Connection from " + address + "\n");
 
-				// Handle in background
-				(async () => {
-					try {
-						// Upgrade to WebTransport
-						// @ts-ignore - unstable API
-						const wt: WebTransport = await Deno.upgradeWebTransport(conn);
-						await _handleWebTransportSession(wt, address);
-					} catch (error) {
-						Sys_Printf('Connection error: ' + (error as Error).message + '\n');
-						try { conn.close(); } catch { /* ignore */ }
-					}
-				})();
-			} catch (error) {
-				if (quicEndpoint) {
-					Sys_Printf('Accept error: ' + (error as Error).message + '\n');
-					// Delay before retrying to prevent 100% CPU spin if accept() fails repeatedly
-					await new Promise(resolve => setTimeout(resolve, 100));
-				}
-			}
-		}
-	} catch (error) {
-		if (quicEndpoint) {
-			Sys_Printf(
-				'Listener error: ' + (error as Error).message + '\n'
-			);
-		}
-	}
+        // Handle in background
+        (async () => {
+          try {
+            // Upgrade to WebTransport
+            // @ts-ignore - unstable API
+            const wt: WebTransport = await Deno.upgradeWebTransport(conn);
+            await _handleWebTransportSession(wt, address);
+          } catch (error) {
+            Sys_Printf("Connection error: " + (error as Error).message + "\n");
+            try {
+              conn.close();
+            } catch { /* ignore */ }
+          }
+        })();
+      } catch (error) {
+        if (quicEndpoint) {
+          Sys_Printf("Accept error: " + (error as Error).message + "\n");
+          // Delay before retrying to prevent 100% CPU spin if accept() fails repeatedly
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+    }
+  } catch (error) {
+    if (quicEndpoint) {
+      Sys_Printf(
+        "Listener error: " + (error as Error).message + "\n",
+      );
+    }
+  }
 }
 
 /**
  * Handle an already-upgraded WebTransport session
  */
-async function _handleWebTransportSession(wt: WebTransport, address: string): Promise<void> {
-	try {
-		await wt.ready;
+async function _handleWebTransportSession(
+  wt: WebTransport,
+  address: string,
+): Promise<void> {
+  try {
+    await wt.ready;
 
-		// Register wt.closed handler early — before stream acceptance.
-		// If stream acceptance times out or fails, wt.closed can reject without
-		// a catch handler, causing unhandled rejection crashes in logs.
-		// We store the sock/conn references later once they exist.
-		let earlyDeath = false;
-		let deferredSock: QSocket | null = null;
-		let deferredConn: ClientConnection | null = null;
-		wt.closed.then(() => {
-			if (deferredSock !== null && deferredConn !== null) {
-				_handleConnectionDeath(deferredSock, deferredConn);
-			} else {
-				earlyDeath = true;
-			}
-		}).catch(() => {
-			if (deferredSock !== null && deferredConn !== null) {
-				_handleConnectionDeath(deferredSock, deferredConn);
-			} else {
-				earlyDeath = true;
-			}
-		});
+    // Register wt.closed handler early — before stream acceptance.
+    // If stream acceptance times out or fails, wt.closed can reject without
+    // a catch handler, causing unhandled rejection crashes in logs.
+    // We store the sock/conn references later once they exist.
+    let earlyDeath = false;
+    let deferredSock: QSocket | null = null;
+    let deferredConn: ClientConnection | null = null;
+    wt.closed.then(() => {
+      if (deferredSock !== null && deferredConn !== null) {
+        _handleConnectionDeath(deferredSock, deferredConn);
+      } else {
+        earlyDeath = true;
+      }
+    }).catch(() => {
+      if (deferredSock !== null && deferredConn !== null) {
+        _handleConnectionDeath(deferredSock, deferredConn);
+      } else {
+        earlyDeath = true;
+      }
+    });
 
-		const clientConn: ClientConnection = {
-			id: nextConnectionId++,
-			webTransport: wt,
-			bidirectionalStream: null,
-			reliableWriter: null,
-			reliableReader: null,
-			unreliableStream: null,
-			unreliableWriter: null,
-			unreliableReader: null,
-			pendingMessages: [],
-			connected: true,
-			address: address,
-			lastMessageTime: Date.now(),
-			pendingWrites: 0,
-		};
+    const clientConn: ClientConnection = {
+      id: nextConnectionId++,
+      webTransport: wt,
+      reliableStream: null,
+      reliableWriter: null,
+      reliableReader: null,
+      datagramWritable: null,
+      datagramReader: null,
+      maxDatagramSize: 0,
+      pendingMessages: [],
+      connected: true,
+      address: address,
+      lastMessageTime: Date.now(),
+      reliableWriteQueue: [],
+      reliableWriteInFlight: false,
+      unreliableQueuedPacket: null,
+      unreliableWriteInFlight: false,
+      outboundDatagramsEnabled: true,
+      pendingReliableWrites: 0,
+      pendingUnreliableWrites: 0,
+    };
 
-		// Accept the first bidirectional stream (reliable channel)
-		const streamReader = wt.incomingBidirectionalStreams.getReader();
-		const { value: stream, done } = await streamReader.read();
+    // Accept the first bidirectional stream (reliable channel)
+    const streamReader = wt.incomingBidirectionalStreams.getReader();
+    const { value: stream, done } = await streamReader.read();
 
-		if (done || !stream) {
-			streamReader.releaseLock();
-			wt.close();
-			return;
-		}
-		clientConn.bidirectionalStream = stream;
-		clientConn.reliableWriter = stream.writable.getWriter();
-		clientConn.reliableReader = stream.readable.getReader();
+    if (done || !stream) {
+      streamReader.releaseLock();
+      wt.close();
+      return;
+    }
+    clientConn.reliableStream = stream;
+    clientConn.reliableWriter = stream.writable.getWriter();
+    clientConn.reliableReader = stream.readable.getReader();
 
-		// Accept the second bidirectional stream (unreliable channel)
-		const { value: stream2, done: done2 } = await streamReader.read();
-		streamReader.releaseLock();
+    streamReader.releaseLock();
 
-		if (done2 || !stream2) {
-			Sys_Printf('Client %s did not open unreliable stream, closing\n', address);
-			wt.close();
-			return;
-		}
-		clientConn.unreliableStream = stream2;
-		clientConn.unreliableWriter = stream2.writable.getWriter();
-		clientConn.unreliableReader = stream2.readable.getReader();
+    // Unreliable channel via WebTransport datagrams
+    const datagrams = wt.datagrams;
+    if (!datagrams) {
+      Sys_Printf("Client %s has no datagram support, closing\n", address);
+      wt.close();
+      return;
+    }
+    clientConn.datagramWritable = datagrams.writable;
+    clientConn.datagramReader = datagrams.readable.getReader();
+    const maxDatagramSize = datagrams.maxDatagramSize;
+    if (typeof maxDatagramSize === "number") {
+      clientConn.maxDatagramSize = maxDatagramSize;
+    }
 
-		// Create a socket for this game connection
-		// Note: With multi-process architecture, lobby protocol is handled by lobby_server.js
-		// Game servers (this code) always run in direct mode
-		const sock = _newQSocket();
-		if (!sock) {
-			Sys_Printf('No free sockets for %s\n', address);
-			wt.close();
-			return;
-		}
+    // Create a socket for this game connection
+    // Note: With multi-process architecture, lobby protocol is handled by lobby_server.js
+    // Game servers (this code) always run in direct mode
+    const sock = _newQSocket();
+    if (!sock) {
+      Sys_Printf("No free sockets for %s\n", address);
+      wt.close();
+      return;
+    }
 
-		sock.address = clientConn.address;
-		sock.driverdata = clientConn;
-		sock.connecttime = performance.now() / 1000;
-		sock.lastMessageTime = performance.now() / 1000;
+    sock.address = clientConn.address;
+    sock.driverdata = clientConn;
+    sock.connecttime = performance.now() / 1000;
+    sock.lastMessageTime = performance.now() / 1000;
+    sock.sendSequence = 0;
+    sock.receiveSequence = -1;
+    sock.ackSequence = -1;
 
-		pendingConnections.push(sock);
+    pendingConnections.push(sock);
 
-		// Wire up deferred wt.closed handler (registered early, before stream acceptance)
-		deferredSock = sock;
-		deferredConn = clientConn;
+    // Wire up deferred wt.closed handler (registered early, before stream acceptance)
+    deferredSock = sock;
+    deferredConn = clientConn;
 
-		// If the transport died during stream acceptance, handle it now
-		if (earlyDeath) {
-			_handleConnectionDeath(sock, clientConn);
-			return;
-		}
+    // If the transport died during stream acceptance, handle it now
+    if (earlyDeath) {
+      _handleConnectionDeath(sock, clientConn);
+      return;
+    }
 
-		_startBackgroundReaders(sock, clientConn);
-
-	} catch (error) {
-		Sys_Printf('Session error for %s: %s\n', address, (error as Error).message);
-		try { wt.close(); } catch { /* ignore */ }
-	}
+    _startBackgroundReaders(sock, clientConn);
+  } catch (error) {
+    Sys_Printf("Session error for %s: %s\n", address, (error as Error).message);
+    try {
+      wt.close();
+    } catch { /* ignore */ }
+  }
 }
 
 /**
- * Start background readers for reliable and unreliable streams.
+ * Start background readers for reliable stream + unreliable datagrams.
  */
 function _startBackgroundReaders(
-	sock: QSocket,
-	conn: ClientConnection
+  sock: QSocket,
+  conn: ClientConnection,
 ): void {
-	// Read reliable messages from the first bidirectional stream
-	(async () => {
-		try {
-			while (conn.connected && conn.reliableReader) {
-				const data = await _readFramedMessage(conn.reliableReader);
-				if (data === null) break;
+  // Read reliable messages from the first bidirectional stream
+  (async () => {
+    try {
+      while (conn.connected && conn.reliableReader) {
+        const data = await _readFramedMessage(conn.reliableReader);
+        if (data === null) break;
 
-				conn.pendingMessages.push({ reliable: true, data });
-				conn.lastMessageTime = Date.now();
+        conn.pendingMessages.push({ reliable: true, data });
+        conn.lastMessageTime = Date.now();
 
-				// If messages are piling up, the game loop isn't consuming them
-				if (conn.pendingMessages.length > MAX_PENDING_MESSAGES) {
-					Sys_Printf('Reliable reader: %d pending messages for %s, disconnecting\n', conn.pendingMessages.length, conn.address);
-					conn.connected = false;
-					break;
-				}
+        // If messages are piling up, the game loop isn't consuming them
+        if (conn.pendingMessages.length > MAX_PENDING_MESSAGES) {
+          Sys_Printf(
+            "Reliable reader: %d pending messages for %s, disconnecting\n",
+            conn.pendingMessages.length,
+            conn.address,
+          );
+          conn.connected = false;
+          break;
+        }
 
-				// Yield to macrotask queue after reading so the game loop can run
-				await _yieldAfterRead();
-			}
-		} catch (error) {
-			if (conn.connected) {
-				Sys_Printf('Reliable reader error for %s: %s\n', conn.address, String(error));
-				conn.connected = false;
-			}
-		}
-		// Release the reader lock when done
-		try {
-			conn.reliableReader?.releaseLock();
-		} catch { /* ignore */ }
-	})();
+        // Yield to macrotask queue after reading so the game loop can run
+        await _yieldAfterRead();
+      }
+    } catch (error) {
+      if (conn.connected) {
+        Sys_Printf(
+          "Reliable reader error for %s: %s\n",
+          conn.address,
+          String(error),
+        );
+        conn.connected = false;
+      }
+    }
+    // Release the reader lock when done
+    try {
+      conn.reliableReader?.releaseLock();
+    } catch { /* ignore */ }
+  })();
 
-	// Read unreliable messages from the second bidirectional stream
-	(async () => {
-		try {
-			while (conn.connected && conn.unreliableReader) {
-				const data = await _readFramedMessage(conn.unreliableReader);
-				if (data === null) break;
+  // Read unreliable messages from datagrams
+  (async () => {
+    try {
+      while (conn.connected && conn.datagramReader) {
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await conn.datagramReader.read();
+        } catch (error) {
+          if (_isTimeoutLikeError(error)) {
+            // WebTransport datagram reads can timeout when no moves arrive yet.
+            // Keep the connection alive and continue polling.
+            await _yieldAfterRead();
+            continue;
+          }
+          throw error;
+        }
 
-				conn.pendingMessages.push({ reliable: false, data });
-				conn.lastMessageTime = Date.now();
+        const { value, done } = result;
+        if (done) break;
+        if (value === undefined || value.length === 0) {
+          // Some runtimes can surface empty datagrams repeatedly.
+          // Yield here to avoid microtask spin that starves timers.
+          await _yieldAfterRead();
+          continue;
+        }
 
-				// If messages are piling up, the game loop isn't consuming them
-				if (conn.pendingMessages.length > MAX_PENDING_MESSAGES) {
-					Sys_Printf('Unreliable reader: %d pending messages for %s, disconnecting\n', conn.pendingMessages.length, conn.address);
-					conn.connected = false;
-					break;
-				}
+        conn.pendingMessages.push({
+          reliable: false,
+          data: new Uint8Array(value),
+        });
+        conn.lastMessageTime = Date.now();
 
-				// Yield to macrotask queue after reading so the game loop can run
-				await _yieldAfterRead();
-			}
-		} catch (error) {
-			if (conn.connected) {
-				Sys_Printf('Unreliable reader error for %s: %s\n', conn.address, String(error));
-				conn.connected = false;
-			}
-		}
-		// Release the reader lock when done
-		try {
-			conn.unreliableReader?.releaseLock();
-		} catch { /* ignore */ }
-	})();
+        // If messages are piling up, the game loop isn't consuming them
+        if (conn.pendingMessages.length > MAX_PENDING_MESSAGES) {
+          Sys_Printf(
+            "Unreliable reader: %d pending messages for %s, disconnecting\n",
+            conn.pendingMessages.length,
+            conn.address,
+          );
+          conn.connected = false;
+          break;
+        }
+
+        // Yield to macrotask queue after reading so the game loop can run
+        await _yieldAfterRead();
+      }
+    } catch (error) {
+      if (conn.connected) {
+        Sys_Printf(
+          "Datagram reader error for %s: %s\n",
+          conn.address,
+          String(error),
+        );
+        conn.connected = false;
+      }
+    }
+    // Release the reader lock when done
+    try {
+      conn.datagramReader?.releaseLock();
+    } catch { /* ignore */ }
+  })();
 }
 
 /**
@@ -434,34 +601,39 @@ function _startBackgroundReaders(
  */
 const _emptyMessage = new Uint8Array(0);
 async function _readFramedMessage(
-	reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
 ): Promise<Uint8Array | null> {
-	// Read header (2 bytes)
-	const header = await _readExact(reader, 2);
-	if (header === null) {
-		return null;
-	}
+  // Read header (2 bytes)
+  const header = await _readExact(reader, 2);
+  if (header === null) {
+    return null;
+  }
 
-	const length = header[0] | (header[1] << 8);
+  const length = header[0] | (header[1] << 8);
 
-	if (length === 0) {
-		return _emptyMessage;
-	}
+  if (length === 0) {
+    return _emptyMessage;
+  }
 
-	// Read message data
-	return await _readExact(reader, length);
+  // Read message data
+  return await _readExact(reader, length);
 }
 
 // Buffer for leftover bytes from previous reads (per-reader tracking)
-const _readerBuffers = new WeakMap<ReadableStreamDefaultReader<Uint8Array>, { data: Uint8Array | null; offset: number }>();
+const _readerBuffers = new WeakMap<
+  ReadableStreamDefaultReader<Uint8Array>,
+  { data: Uint8Array | null; offset: number }
+>();
 
-function _getReaderBuffer(reader: ReadableStreamDefaultReader<Uint8Array>): { data: Uint8Array | null; offset: number } {
-	let buf = _readerBuffers.get(reader);
-	if (!buf) {
-		buf = { data: null, offset: 0 };
-		_readerBuffers.set(reader, buf);
-	}
-	return buf;
+function _getReaderBuffer(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): { data: Uint8Array | null; offset: number } {
+  let buf = _readerBuffers.get(reader);
+  if (!buf) {
+    buf = { data: null, offset: 0 };
+    _readerBuffers.set(reader, buf);
+  }
+  return buf;
 }
 
 /**
@@ -471,45 +643,56 @@ function _getReaderBuffer(reader: ReadableStreamDefaultReader<Uint8Array>): { da
  * event loop freezes in Deno's QUIC stack).
  */
 async function _readExact(
-	reader: ReadableStreamDefaultReader<Uint8Array>,
-	n: number
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  n: number,
 ): Promise<Uint8Array | null> {
-	const buf = _getReaderBuffer(reader);
-	const result = new Uint8Array(n);
-	let offset = 0;
+  const buf = _getReaderBuffer(reader);
+  const output = new Uint8Array(n);
+  let offset = 0;
 
-	// Drain leftover bytes from previous read
-	if (buf.data !== null) {
-		const available = buf.data.length - buf.offset;
-		const bytesToCopy = Math.min(available, n);
-		result.set(buf.data.subarray(buf.offset, buf.offset + bytesToCopy), 0);
-		offset = bytesToCopy;
-		buf.offset += bytesToCopy;
+  // Drain leftover bytes from previous read
+  if (buf.data !== null) {
+    const available = buf.data.length - buf.offset;
+    const bytesToCopy = Math.min(available, n);
+    output.set(buf.data.subarray(buf.offset, buf.offset + bytesToCopy), 0);
+    offset = bytesToCopy;
+    buf.offset += bytesToCopy;
 
-		if (buf.offset >= buf.data.length) {
-			buf.data = null;
-			buf.offset = 0;
-		}
-	}
+    if (buf.offset >= buf.data.length) {
+      buf.data = null;
+      buf.offset = 0;
+    }
+  }
 
-	// Read from stream until we have n bytes
-	while (offset < n) {
-		const { value, done } = await reader.read();
-		if (done) return null;
-		if (value === undefined || value.length === 0) return null;
+  // Read from stream until we have n bytes
+  while (offset < n) {
+    let readResult: ReadableStreamReadResult<Uint8Array>;
+    try {
+      readResult = await reader.read();
+    } catch (error) {
+      if (_isTimeoutLikeError(error)) {
+        await _yieldAfterRead();
+        continue;
+      }
+      throw error;
+    }
 
-		const bytesToCopy = Math.min(value.length, n - offset);
-		result.set(value.subarray(0, bytesToCopy), offset);
-		offset += bytesToCopy;
+    const { value, done } = readResult;
+    if (done) return null;
+    if (value === undefined || value.length === 0) return null;
 
-		// Save leftover bytes for next call
-		if (bytesToCopy < value.length) {
-			buf.data = value;
-			buf.offset = bytesToCopy;
-		}
-	}
+    const bytesToCopy = Math.min(value.length, n - offset);
+    output.set(value.subarray(0, bytesToCopy), offset);
+    offset += bytesToCopy;
 
-	return result;
+    // Save leftover bytes for next call
+    if (bytesToCopy < value.length) {
+      buf.data = value;
+      buf.offset = bytesToCopy;
+    }
+  }
+
+  return output;
 }
 
 /**
@@ -518,60 +701,60 @@ async function _readExact(
  * Otherwise falls back to internal allocation
  */
 function _newQSocket(): QSocket | null {
-	// If we have an external allocator (from net_main.js), use it
-	if (_NET_NewQSocket !== null) {
-		const sock = _NET_NewQSocket();
-		if (sock !== null) {
-			sock.driver = net_driverlevel;
-		}
-		return sock;
-	}
+  // If we have an external allocator (from net_main.js), use it
+  if (_NET_NewQSocket !== null) {
+    const sock = _NET_NewQSocket();
+    if (sock !== null) {
+      sock.driver = net_driverlevel;
+    }
+    return sock;
+  }
 
-	// Fallback to internal allocation (for standalone testing)
-	if (!freeSockets) {
-		// Allocate more sockets if needed
-		if (numSockets >= 32) return null; // Max sockets
+  // Fallback to internal allocation (for standalone testing)
+  if (!freeSockets) {
+    // Allocate more sockets if needed
+    if (numSockets >= 32) return null; // Max sockets
 
-		const sock: QSocket = {
-			next: null,
-			connecttime: 0,
-			lastMessageTime: 0,
-			lastSendTime: 0,
-			disconnected: false,
-			canSend: true,
-			sendNext: false,
-			driver: net_driverlevel,
-			landriver: 0,
-			socket: 0,
-			driverdata: null,
-			ackSequence: 0,
-			sendSequence: 0,
-			unreliableSendSequence: 0,
-			sendMessageLength: 0,
-			sendMessage: new Uint8Array(NET_MAXMESSAGE),
-			receiveSequence: 0,
-			unreliableReceiveSequence: 0,
-			receiveMessageLength: 0,
-			receiveMessage: new Uint8Array(NET_MAXMESSAGE),
-			addr: null,
-			address: '',
-		};
+    const sock: QSocket = {
+      next: null,
+      connecttime: 0,
+      lastMessageTime: 0,
+      lastSendTime: 0,
+      disconnected: false,
+      canSend: true,
+      sendNext: false,
+      driver: net_driverlevel,
+      landriver: 0,
+      socket: 0,
+      driverdata: null,
+      ackSequence: 0,
+      sendSequence: 0,
+      unreliableSendSequence: 0,
+      sendMessageLength: 0,
+      sendMessage: new Uint8Array(NET_MAXMESSAGE),
+      receiveSequence: 0,
+      unreliableReceiveSequence: 0,
+      receiveMessageLength: 0,
+      receiveMessage: new Uint8Array(NET_MAXMESSAGE),
+      addr: null,
+      address: "",
+    };
 
-		numSockets++;
-		return sock;
-	}
+    numSockets++;
+    return sock;
+  }
 
-	const sock = freeSockets;
-	freeSockets = sock.next;
+  const sock = freeSockets;
+  freeSockets = sock.next;
 
-	// Reset socket state
-	sock.next = activeSockets;
-	activeSockets = sock;
-	sock.disconnected = false;
-	sock.canSend = true;
-	sock.driverdata = null;
+  // Reset socket state
+  sock.next = activeSockets;
+  activeSockets = sock;
+  sock.disconnected = false;
+  sock.canSend = true;
+  sock.driverdata = null;
 
-	return sock;
+  return sock;
 }
 
 /**
@@ -587,280 +770,490 @@ function _newQSocket(): QSocket | null {
  * so we must clean them up directly (including setting disconnected and freeing).
  */
 function _handleConnectionDeath(sock: QSocket, conn: ClientConnection): void {
-	conn.connected = false;
+  conn.connected = false;
+  conn.reliableWriteQueue.length = 0;
+  conn.unreliableQueuedPacket = null;
+  conn.reliableWriteInFlight = false;
+  conn.unreliableWriteInFlight = false;
+  conn.outboundDatagramsEnabled = false;
+  conn.datagramWritable = null;
+  conn.pendingReliableWrites = 0;
+  conn.pendingUnreliableWrites = 0;
+  _unreliableReadySet.delete(conn.id);
 
-	// Cancel readers to unblock any stuck reader.read() calls in _readExact.
-	// Without this, reader loops can spin indefinitely after the transport closes.
-	try {
-		if (conn.reliableReader) {
-			conn.reliableReader.cancel().catch(() => {});
-		}
-		if (conn.unreliableReader) {
-			conn.unreliableReader.cancel().catch(() => {});
-		}
-	} catch { /* ignore */ }
+  // Cancel readers to unblock any stuck reader.read() calls in _readExact.
+  // Without this, reader loops can spin indefinitely after the transport closes.
+  try {
+    if (conn.reliableReader) {
+      conn.reliableReader.cancel().catch(() => {});
+    }
+    if (conn.datagramReader) {
+      conn.datagramReader.cancel().catch(() => {});
+    }
+  } catch { /* ignore */ }
 
-	// Check if socket is still in pending queue (never assigned to a client)
-	const pendingIdx = pendingConnections.indexOf(sock);
-	if (pendingIdx !== -1) {
-		// Socket never made it to a client slot - clean up directly
-		pendingConnections.splice(pendingIdx, 1);
-		sock.disconnected = true;  // Only set for pending sockets
+  // Check if socket is still in pending queue (never assigned to a client)
+  const pendingIdx = pendingConnections.indexOf(sock);
+  if (pendingIdx !== -1) {
+    // Socket never made it to a client slot - clean up directly
+    pendingConnections.splice(pendingIdx, 1);
+    sock.disconnected = true; // Only set for pending sockets
 
-		// Free the socket back to the pool (only for pending sockets)
-		if (_NET_FreeQSocket !== null) {
-			_NET_FreeQSocket(sock);
-		}
-	}
-	// For sockets already assigned to clients:
-	// - DON'T set sock.disconnected = true (would skip NET_Close cleanup)
-	// - conn.connected = false makes WT_QGetMessage return -1
-	// - This triggers SV_DropClient -> NET_Close -> WT_Close + NET_FreeQSocket
+    // Free the socket back to the pool (only for pending sockets)
+    if (_NET_FreeQSocket !== null) {
+      _NET_FreeQSocket(sock);
+    }
+  }
+  // For sockets already assigned to clients:
+  // - DON'T set sock.disconnected = true (would skip NET_Close cleanup)
+  // - conn.connected = false makes WT_QGetMessage return -1
+  // - This triggers SV_DropClient -> NET_Close -> WT_Close + NET_FreeQSocket
 }
 
 /**
  * Free a socket
  */
 export function WT_FreeQSocket(sock: QSocket): void {
-	// Remove from active list
-	if (sock === activeSockets) {
-		activeSockets = sock.next;
-	} else {
-		let s = activeSockets;
-		while (s) {
-			if (s.next === sock) {
-				s.next = sock.next;
-				break;
-			}
-			s = s.next;
-		}
-	}
+  // Remove from active list
+  if (sock === activeSockets) {
+    activeSockets = sock.next;
+  } else {
+    let s = activeSockets;
+    while (s) {
+      if (s.next === sock) {
+        s.next = sock.next;
+        break;
+      }
+      s = s.next;
+    }
+  }
 
-	// Add to free list
-	sock.next = freeSockets;
-	freeSockets = sock;
-	sock.disconnected = true;
+  // Add to free list
+  sock.next = freeSockets;
+  freeSockets = sock;
+  sock.disconnected = true;
 }
 
 /**
  * Search for hosts (server doesn't search)
  */
 export function WT_SearchForHosts(_xmit: boolean): void {
-	// Server doesn't search for other servers
+  // Server doesn't search for other servers
 }
 
 /**
  * Connect (server doesn't connect out)
  */
 export function WT_Connect(_host: string): null {
-	// Server doesn't connect to other servers
-	return null;
+  // Server doesn't connect to other servers
+  return null;
 }
 
 /**
  * Check for new incoming connections
  */
 export function WT_CheckNewConnections(): QSocket | null {
-	// Filter out any disconnected sockets first
-	while (pendingConnections.length > 0) {
-		const sock = pendingConnections[0];
-		if (sock.disconnected) {
-			// Socket died before we could process it, remove and continue
-			pendingConnections.shift();
-			Sys_Printf('Skipped disconnected socket in pending queue\n');
-			continue;
-		}
-		return pendingConnections.shift()!;
-	}
-	return null;
+  // Filter out any disconnected sockets first
+  while (pendingConnections.length > 0) {
+    const sock = pendingConnections[0];
+    if (sock.disconnected) {
+      // Socket died before we could process it, remove and continue
+      pendingConnections.shift();
+      Sys_Printf("Skipped disconnected socket in pending queue\n");
+      continue;
+    }
+    return pendingConnections.shift()!;
+  }
+  return null;
 }
 
 /**
  * Get a message from a socket
  */
 export function WT_QGetMessage(sock: QSocket): number {
-	const conn = sock.driverdata;
-	if (conn === null) return -1;
+  const conn = sock.driverdata;
+  if (conn === null) return -1;
 
-	if (!conn.connected && conn.pendingMessages.length === 0) {
-		return -1;
-	}
+  if (!conn.connected && conn.pendingMessages.length === 0) {
+    return -1;
+  }
 
-	if (conn.pendingMessages.length === 0) {
-		return 0;
-	}
+  while (conn.pendingMessages.length > 0) {
+    // Get next message
+    let msg = conn.pendingMessages.shift()!;
 
-	// Get next message
-	let msg = conn.pendingMessages.shift()!;
+    // For unreliable messages, skip to the most recent one.
+    // In original Quake, unreliable messages are overwritten by newer ones.
+    // The WebTransport datagram reader queues all datagrams, so if the client
+    // sends faster than the server reads, stale messages pile up.
+    // Discard stale unreliable messages but preserve any reliable messages.
+    if (!msg.reliable) {
+      while (conn.pendingMessages.length > 0) {
+        const next = conn.pendingMessages[0];
+        if (next.reliable) break; // Stop at next reliable message
+        conn.pendingMessages.shift();
+        msg = next; // Use newer unreliable message
+      }
+    }
 
-	// For unreliable messages, skip to the most recent one.
-	// In original Quake, unreliable messages are overwritten by newer ones.
-	// The WebTransport datagram reader queues all datagrams, so if the client
-	// sends faster than the server reads, stale messages pile up.
-	// Discard stale unreliable messages but preserve any reliable messages.
-	if (!msg.reliable) {
-		while (conn.pendingMessages.length > 0) {
-			const next = conn.pendingMessages[0];
-			if (next.reliable) break; // Stop at next reliable message
-			conn.pendingMessages.shift();
-			msg = next; // Use newer unreliable message
-		}
-	}
+    const payload = _parseSequencedPacket(sock, msg.data);
+    if (payload === null) {
+      continue;
+    }
 
-	// Copy to net_message
-	net_message.cursize = 0;
-	for (let i = 0; i < msg.data.length && i < net_message.maxsize; i++) {
-		net_message.data[i] = msg.data[i];
-		net_message.cursize++;
-	}
+    // Copy to net_message
+    net_message.cursize = 0;
+    for (let i = 0; i < payload.length && i < net_message.maxsize; i++) {
+      net_message.data[i] = payload[i];
+      net_message.cursize++;
+    }
 
-	sock.lastMessageTime = performance.now() / 1000;
+    sock.lastMessageTime = performance.now() / 1000;
 
-	return msg.reliable ? 1 : 2;
+    return msg.reliable ? 1 : 2;
+  }
+
+  if (conn.connected) {
+    return 0;
+  }
+
+  return -1;
+}
+
+function _updatePendingWriteCounts(conn: ClientConnection): void {
+  conn.pendingReliableWrites = conn.reliableWriteQueue.length +
+    (conn.reliableWriteInFlight ? 1 : 0);
+
+  if (conn.outboundDatagramsEnabled === false || conn.datagramWritable === null) {
+    conn.pendingUnreliableWrites = 0;
+    return;
+  }
+
+  conn.pendingUnreliableWrites =
+    (conn.unreliableWriteInFlight ? 1 : 0) +
+    (conn.unreliableQueuedPacket !== null ? 1 : 0);
+}
+
+function _pumpReliableWrites(conn: ClientConnection): void {
+  if (
+    !conn.connected || conn.reliableWriter === null ||
+    conn.reliableWriteInFlight
+  ) {
+    return;
+  }
+
+  conn.reliableWriteInFlight = true;
+  _updatePendingWriteCounts(conn);
+
+  (async () => {
+    while (conn.connected && conn.reliableWriter !== null) {
+      const frame = conn.reliableWriteQueue.shift();
+      if (frame === undefined) {
+        break;
+      }
+
+      _updatePendingWriteCounts(conn);
+
+      try {
+        await conn.reliableWriter.write(frame);
+      } catch (err) {
+        Sys_Printf(
+          "WT_QSendMessage: write FAILED: %s\n",
+          (err as Error).message,
+        );
+        conn.connected = false;
+        break;
+      }
+    }
+
+    conn.reliableWriteInFlight = false;
+    _updatePendingWriteCounts(conn);
+
+    // Covers a race where data was queued between shift() and inFlight=false.
+    if (
+      conn.connected && conn.reliableWriter !== null &&
+      conn.reliableWriteQueue.length > 0
+    ) {
+      _pumpReliableWrites(conn);
+    }
+  })();
+}
+
+function _enqueueUnreliableConn(conn: ClientConnection): void {
+  if (
+    !conn.connected || conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null ||
+    conn.unreliableQueuedPacket === null
+  ) {
+    return;
+  }
+
+  if (_unreliableReadySet.has(conn.id)) {
+    return;
+  }
+
+  _unreliableReadySet.add(conn.id);
+  _unreliableReadyQueue.push(conn);
+}
+
+function _dequeueUnreliableConn(): ClientConnection | null {
+  while (_unreliableReadyQueue.length > 0) {
+    const conn = _unreliableReadyQueue.shift()!;
+    _unreliableReadySet.delete(conn.id);
+
+    if (
+      !conn.connected || conn.outboundDatagramsEnabled === false ||
+      conn.datagramWritable === null ||
+      conn.unreliableQueuedPacket === null
+    ) {
+      continue;
+    }
+
+    return conn;
+  }
+
+  return null;
+}
+
+function _pumpUnreliableWrites(): void {
+  if (_unreliableGlobalWriteInFlight) {
+    return;
+  }
+
+  _unreliableGlobalWriteInFlight = true;
+
+  (async () => {
+    while (true) {
+      const conn = _dequeueUnreliableConn();
+      if (conn === null) {
+        break;
+      }
+
+      const packet = conn.unreliableQueuedPacket;
+      if (packet === null) {
+        continue;
+      }
+
+      conn.unreliableQueuedPacket = null;
+      conn.unreliableWriteInFlight = true;
+      _updatePendingWriteCounts(conn);
+
+      let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+      try {
+        if (conn.datagramWritable === null) {
+          _disableOutboundDatagrams(conn, "datagram channel unavailable");
+        } else {
+          writer = conn.datagramWritable.getWriter();
+          await writer.write(packet);
+        }
+      } catch (error) {
+        // Unreliable channel write timeouts are observed in Deno under load.
+        // Downgrade this connection to reliable-only instead of hard drop.
+        if (_isTimeoutLikeError(error)) {
+          _disableOutboundDatagrams(conn, "timeout");
+        } else {
+          _disableOutboundDatagrams(conn, String(error));
+        }
+      } finally {
+        if (writer !== null) {
+          try {
+            writer.releaseLock();
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      conn.unreliableWriteInFlight = false;
+      _updatePendingWriteCounts(conn);
+
+      if (
+        conn.connected &&
+        conn.outboundDatagramsEnabled &&
+        conn.datagramWritable !== null &&
+        conn.unreliableQueuedPacket !== null
+      ) {
+        _enqueueUnreliableConn(conn);
+      }
+    }
+
+    _unreliableGlobalWriteInFlight = false;
+
+    // Covers a race where packets were queued after the dequeue loop drained.
+    if (_unreliableReadyQueue.length > 0) {
+      _pumpUnreliableWrites();
+    }
+  })();
 }
 
 /**
  * Send a reliable message.
  */
 export function WT_QSendMessage(
-	sock: QSocket,
-	data: { data: Uint8Array; cursize: number }
+  sock: QSocket,
+  data: { data: Uint8Array; cursize: number },
 ): number {
-	const conn = sock.driverdata;
-	if (!conn || !conn.connected || !conn.reliableWriter) {
-		return -1;
-	}
+  const conn = sock.driverdata;
+  if (!conn || !conn.connected || !conn.reliableWriter) {
+    return -1;
+  }
 
-	// Backpressure: if too many writes are in-flight, the connection is dead/zombie
-	if (conn.pendingWrites > MAX_PENDING_WRITES_RELIABLE) {
-		Sys_Printf('WT_QSendMessage: %d pending writes for %s, disconnecting\n', conn.pendingWrites, conn.address);
-		conn.connected = false;
-		return -1;
-	}
+  // Backpressure: if too many reliable writes are queued, connection is dead/zombie.
+  const pendingReliable = conn.reliableWriteQueue.length +
+    (conn.reliableWriteInFlight ? 1 : 0);
+  if (pendingReliable >= MAX_PENDING_WRITES_RELIABLE) {
+    Sys_Printf(
+      "WT_QSendMessage: %d reliable pending writes for %s, disconnecting\n",
+      pendingReliable,
+      conn.address,
+    );
+    conn.connected = false;
+    return -1;
+  }
 
-	// Frame the message: [length:2][data:N]
-	const frame = new Uint8Array(2 + data.cursize);
-	frame[0] = data.cursize & 0xff;
-	frame[1] = (data.cursize >> 8) & 0xff;
-	frame.set(data.data.subarray(0, data.cursize), 2);
+  const packet = _buildSequencedPacket(sock, data.data, data.cursize);
 
-	conn.pendingWrites++;
-	conn.reliableWriter.write(frame).then(() => {
-		conn.pendingWrites--;
-	}).catch((err) => {
-		conn.pendingWrites--;
-		Sys_Printf('WT_QSendMessage: write FAILED: %s\n', (err as Error).message);
-		conn.connected = false;
-	});
+  // Frame the message: [length:2][data:N]
+  const frame = new Uint8Array(2 + packet.length);
+  frame[0] = packet.length & 0xff;
+  frame[1] = (packet.length >> 8) & 0xff;
+  frame.set(packet, 2);
 
-	return 1;
+  conn.reliableWriteQueue.push(frame);
+  _updatePendingWriteCounts(conn);
+  _pumpReliableWrites(conn);
+
+  return 1;
 }
 
 /**
- * Send an unreliable message over the second bidirectional stream (unreliable channel).
+ * Send an unreliable message over WebTransport datagrams.
  */
 export function WT_SendUnreliableMessage(
-	sock: QSocket,
-	data: { data: Uint8Array; cursize: number }
+  sock: QSocket,
+  data: { data: Uint8Array; cursize: number },
 ): number {
-	const conn = sock.driverdata;
-	if (!conn || !conn.connected || !conn.unreliableWriter) return -1;
+  const conn = sock.driverdata;
+  if (!conn || !conn.connected) return -1;
 
-	// Backpressure: unreliable messages are expendable — skip if writes are backed up.
-	// Next tick will send fresh data anyway.
-	if (conn.pendingWrites > MAX_PENDING_WRITES_UNRELIABLE) {
-		return 1; // Pretend success — caller doesn't need to know we dropped it
-	}
+  if (
+    USE_OUTBOUND_DATAGRAMS === false ||
+    conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null
+  ) {
+    return WT_QSendMessage(sock, data);
+  }
 
-	// Frame the message: [length:2][data:N]
-	const frame = new Uint8Array(2 + data.cursize);
-	frame[0] = data.cursize & 0xff;
-	frame[1] = (data.cursize >> 8) & 0xff;
-	frame.set(data.data.subarray(0, data.cursize), 2);
+  const packet = _buildSequencedPacket(sock, data.data, data.cursize);
 
-	conn.pendingWrites++;
-	conn.unreliableWriter.write(frame).then(() => {
-		conn.pendingWrites--;
-	}).catch(() => {
-		conn.pendingWrites--;
-		// Unreliable — silently fail
-	});
+  if (conn.maxDatagramSize > 0 && packet.length > conn.maxDatagramSize) {
+    return 1;
+  }
 
-	return 1;
+  // Only keep the latest unreliable packet while one write is in flight.
+  conn.unreliableQueuedPacket = packet;
+  _updatePendingWriteCounts(conn);
+  _enqueueUnreliableConn(conn);
+  _pumpUnreliableWrites();
+
+  return 1;
 }
 
 /**
  * Check if we can send a reliable message
  */
 export function WT_CanSendMessage(sock: QSocket): boolean {
-	const conn = sock.driverdata;
-	return conn !== null && conn.connected;
+  const conn = sock.driverdata;
+  return conn !== null &&
+    conn.connected &&
+    conn.reliableWriter !== null &&
+    conn.pendingReliableWrites < MAX_PENDING_WRITES_RELIABLE;
 }
 
 /**
  * Check if we can send an unreliable message
  */
 export function WT_CanSendUnreliableMessage(sock: QSocket): boolean {
-	const conn = sock.driverdata;
-	return conn !== null && conn.connected;
+  const conn = sock.driverdata;
+  if (conn === null || conn.connected === false) {
+    return false;
+  }
+
+  if (
+    USE_OUTBOUND_DATAGRAMS === false ||
+    conn.outboundDatagramsEnabled === false ||
+    conn.datagramWritable === null
+  ) {
+    return WT_CanSendMessage(sock);
+  }
+
+  return conn !== null &&
+    conn.datagramWritable !== null &&
+    !(conn.unreliableWriteInFlight && conn.unreliableQueuedPacket !== null) &&
+    conn.pendingUnreliableWrites < MAX_PENDING_WRITES_UNRELIABLE;
 }
 
 /**
  * Close a connection
  */
 export function WT_Close(sock: QSocket): void {
-	const conn = sock.driverdata;
-	if (!conn) return;
+  const conn = sock.driverdata;
+  if (!conn) return;
 
-	conn.connected = false;
+  conn.connected = false;
+  conn.reliableWriteQueue.length = 0;
+  conn.unreliableQueuedPacket = null;
+  conn.reliableWriteInFlight = false;
+  conn.unreliableWriteInFlight = false;
+  conn.outboundDatagramsEnabled = false;
+  conn.pendingReliableWrites = 0;
+  conn.pendingUnreliableWrites = 0;
+  _unreliableReadySet.delete(conn.id);
 
-	try {
-		// Cancel readers first — unblocks any stuck reader.read() in _readExact
-		if (conn.reliableReader) {
-			conn.reliableReader.cancel().catch(() => {});
-			conn.reliableReader = null;
-		}
-		if (conn.unreliableReader) {
-			conn.unreliableReader.cancel().catch(() => {});
-			conn.unreliableReader = null;
-		}
+  try {
+    // Cancel readers first — unblocks any stuck reader.read() in _readExact
+    if (conn.reliableReader) {
+      conn.reliableReader.cancel().catch(() => {});
+      conn.reliableReader = null;
+    }
+    if (conn.datagramReader) {
+      conn.datagramReader.cancel().catch(() => {});
+      conn.datagramReader = null;
+    }
 
-		// Close writers
-		if (conn.reliableWriter) {
-			conn.reliableWriter.close().catch(() => {});
-			conn.reliableWriter = null;
-		}
-		if (conn.unreliableWriter) {
-			conn.unreliableWriter.close().catch(() => {});
-			conn.unreliableWriter = null;
-		}
-		conn.webTransport.close();
-	} catch {
-		// Ignore errors during close
-	}
+    // Close writers
+    if (conn.reliableWriter) {
+      conn.reliableWriter.close().catch(() => {});
+      conn.reliableWriter = null;
+    }
+    conn.datagramWritable = null;
+    conn.webTransport.close();
+  } catch {
+    // Ignore errors during close
+  }
 
-	Sys_Printf('Connection closed: ' + conn.address + '\n');
-	sock.driverdata = null;
+  Sys_Printf("Connection closed: " + conn.address + "\n");
+  sock.driverdata = null;
 }
 
 /**
  * Configure the server
  */
 export function WT_SetConfig(config: {
-	port?: number;
-	certFile?: string;
-	keyFile?: string;
+  port?: number;
+  certFile?: string;
+  keyFile?: string;
 }): void {
-	if (config.port) serverPort = config.port;
-	if (config.certFile) certFile = config.certFile;
-	if (config.keyFile) keyFile = config.keyFile;
+  if (config.port) serverPort = config.port;
+  if (config.certFile) certFile = config.certFile;
+  if (config.keyFile) keyFile = config.keyFile;
 }
 
 /**
  * Set driver level (called by net_main)
  */
 export function WT_SetDriverLevel(level: number): void {
-	net_driverlevel = level;
+  net_driverlevel = level;
 }
 
 /**
@@ -868,23 +1261,31 @@ export function WT_SetDriverLevel(level: number): void {
  * Used for heartbeat diagnostics to detect write backpressure building up.
  */
 export function WT_GetMaxPendingWrites(): number {
-	let max = 0;
-	let sock = activeSockets;
-	while (sock) {
-		const conn = sock.driverdata;
-		if (conn !== null && conn.pendingWrites > max) {
-			max = conn.pendingWrites;
-		}
-		sock = sock.next;
-	}
-	// Also check pending connections
-	for (let i = 0; i < pendingConnections.length; i++) {
-		const conn = pendingConnections[i].driverdata;
-		if (conn !== null && conn.pendingWrites > max) {
-			max = conn.pendingWrites;
-		}
-	}
-	return max;
+  let max = 0;
+  let sock = activeSockets;
+  while (sock) {
+    const conn = sock.driverdata;
+    if (conn !== null) {
+      const pendingTotal = conn.pendingReliableWrites +
+        conn.pendingUnreliableWrites;
+      if (pendingTotal > max) {
+        max = pendingTotal;
+      }
+    }
+    sock = sock.next;
+  }
+  // Also check pending connections
+  for (let i = 0; i < pendingConnections.length; i++) {
+    const conn = pendingConnections[i].driverdata;
+    if (conn !== null) {
+      const pendingTotal = conn.pendingReliableWrites +
+        conn.pendingUnreliableWrites;
+      if (pendingTotal > max) {
+        max = pendingTotal;
+      }
+    }
+  }
+  return max;
 }
 
 /**

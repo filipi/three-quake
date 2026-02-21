@@ -69,6 +69,8 @@ export function Host_InitCommands() {
 	Cmd_AddCommand( 'give', Host_Give_f );
 	Cmd_AddCommand( 'ping', Host_Ping_f );
 	Cmd_AddCommand( 'kick', Host_Kick_f );
+	Cmd_AddCommand( 'save', Host_Savegame_f );
+	Cmd_AddCommand( 'load', Host_Loadgame_f );
 	Cmd_AddCommand( 'savegame', Host_Savegame_f );
 	Cmd_AddCommand( 'loadgame', Host_Loadgame_f );
 	Cmd_AddCommand( 'startdemos', Host_Startdemos_f );

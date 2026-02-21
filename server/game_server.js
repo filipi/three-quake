@@ -44,6 +44,9 @@ import {
 } from './net_webtransport_server.ts';
 import { NET_NewQSocket, NET_FreeQSocket } from '../src/net_main.js';
 
+// Reduce log write volume in production. Keep only allowlisted lines.
+globalThis.__THREE_QUAKE_QUIET_LOGS = true;
+
 // Global unhandled rejection handler - prevent server crashes from async errors
 globalThis.addEventListener('unhandledrejection', (event) => {
 	Sys_Printf('Unhandled promise rejection: %s\n', String(event.reason));

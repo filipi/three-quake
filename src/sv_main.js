@@ -54,7 +54,7 @@ import {
 import { hostname } from './net_main.js';
 import {
 	NET_CheckNewConnections, NET_SendMessage, NET_SendUnreliableMessage,
-	NET_CanSendMessage, NET_SendToAll, NET_Close, NET_GetMessage
+	NET_CanSendMessage, NET_CanSendUnreliableMessage, NET_SendToAll, NET_Close, NET_GetMessage
 } from './net_main.js';
 import { net_activeconnections, set_net_activeconnections } from './net.js';
 import { realtime, Host_ClearMemory, set_host_frametime } from './host.js';
@@ -1238,6 +1238,11 @@ const _sendReconnectBuf = new Uint8Array( 128 );
 const _sendReconnectMsg = { allowoverflow: false, overflowed: false, data: _sendReconnectBuf, maxsize: 128, cursize: 0 };
 
 function SV_SendClientDatagram( client ) {
+
+	// QW-style send gating: if transport is choked/backed up, skip building
+	// expensive per-frame datagrams and try again next frame.
+	if ( ! NET_CanSendUnreliableMessage( client.netconnection ) )
+		return true;
 
 	_scdMsg.allowoverflow = false;
 	_scdMsg.overflowed = false;

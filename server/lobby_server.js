@@ -6,6 +6,9 @@
 
 import { Sys_Printf } from './sys_server.ts';
 
+// Reduce log write volume in production. Keep only allowlisted lines.
+globalThis.__THREE_QUAKE_QUIET_LOGS = true;
+
 // Global unhandled rejection handler - prevent server crashes from async errors
 globalThis.addEventListener( 'unhandledrejection', ( event ) => {
 	Sys_Printf( 'Unhandled promise rejection: %s\n', String( event.reason ) );
@@ -17,6 +20,7 @@ import {
 	RoomManager_GetRoom,
 	RoomManager_ListRooms,
 	RoomManager_CleanupIdleRooms,
+	RoomManager_CleanupUnhealthyRooms,
 	RoomManager_ShutdownAll,
 } from './room_process_manager.ts';
 
@@ -51,6 +55,7 @@ const LOBBY_JOIN = 0x02;
 const LOBBY_CREATE = 0x03;
 const LOBBY_ROOMS = 0x81;
 const LOBBY_ERROR = 0x82;
+const ROOM_ID_PATTERN = /^[A-Z0-9]{6}$/;
 
 // QUIC endpoint
 let quicEndpoint = null;
@@ -258,26 +263,37 @@ async function handleSession( wt, address ) {
 				// Get room info so client knows which port to connect to
 				const roomId = new TextDecoder().decode( msg.data ).trim().toUpperCase();
 				let room = RoomManager_GetRoom( roomId );
+				let attemptedRoomAutocreate = false;
+				let roomCreateResult = null;
 
-				// Auto-create room for shared Twitter link (3LUVYX)
-				if ( room === null && roomId === '3LUVYX' ) {
-					Sys_Printf( 'Auto-creating shared room for link: %s\n', roomId );
-					const result = await RoomManager_CreateRoom( {
+				// If a valid room ID link points to an expired room, auto-create it.
+				if ( room === null && ROOM_ID_PATTERN.test( roomId ) ) {
+					attemptedRoomAutocreate = true;
+					Sys_Printf( 'Auto-creating room for link ID: %s\n', roomId );
+					roomCreateResult = await RoomManager_CreateRoom( {
 						map: 'rapture1',
 						maxPlayers: 4,
 						hostName: 'Shared',
-						specificId: '3LUVYX',  // Use the specific ID so all joiners end up in same room
+						specificId: roomId,
 					} );
-					if ( result !== null ) {
-						room = RoomManager_GetRoom( roomId );  // Now this will find the 3LUVYX room
-					}
+					// Re-check room either way:
+					// - create succeeded (new room)
+					// - create raced with another join and room already exists
+					room = RoomManager_GetRoom( roomId );
 				}
 
 				if ( room === null ) {
-					const errorMsg = 'Room not found. The game may have ended.';
+					let errorMsg = 'Room not found. The game may have ended.';
+					if ( attemptedRoomAutocreate === true ) {
+						if ( RoomManager_ListRooms().length >= 10 ) {
+							errorMsg = 'Server room limit reached. Try again later.';
+						} else if ( roomCreateResult === null ) {
+							errorMsg = 'Unable to create room right now. Please try again.';
+						}
+					}
 					const errorData = new TextEncoder().encode( errorMsg );
 					await sendFramedMessage( writer, LOBBY_ERROR, errorData );
-					Sys_Printf( 'Room %s not found for %s\n', roomId, address );
+					Sys_Printf( 'Room %s unavailable for %s (%s)\n', roomId, address, errorMsg );
 				} else if ( room.playerCount >= room.maxPlayers ) {
 					// Room is full
 					const errorMsg = 'Room is full (' + room.playerCount + '/' + room.maxPlayers + ' players)';
@@ -385,6 +401,11 @@ async function startServer() {
 
 	// Start cleanup timer (every 5 minutes)
 	setInterval( () => {
+		const unhealthy = RoomManager_CleanupUnhealthyRooms();
+		if ( unhealthy > 0 ) {
+			Sys_Printf( 'Cleaned up %d unhealthy rooms\n', unhealthy );
+		}
+
 		const cleaned = RoomManager_CleanupIdleRooms();
 		if ( cleaned > 0 ) {
 			Sys_Printf( 'Cleaned up %d idle rooms\n', cleaned );

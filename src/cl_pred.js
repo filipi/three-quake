@@ -37,6 +37,7 @@ class predicted_player_t {
 		this.effects = 0;
 		this.weaponframe = 0;
 		this.msec = 0; // Time since last server frame
+		this.serverSequence = 0; // Last svc_serversequence this player was updated in
 		// Movement command for physics prediction
 		this.cmd = {
 			msec: 0,
@@ -95,6 +96,8 @@ export class frame_t {
 			upmove: 0,
 			buttons: 0
 		};
+		this.sequence = - 1; // Absolute client command sequence stored in this slot
+		this.netsequence = - 1; // Transport-level packet sequence used to send this command
 		this.senttime = 0; // Time command was sent
 		this.playerstate = new player_state_t();
 	}
@@ -125,8 +128,9 @@ for ( let i = 0; i < UPDATE_BACKUP; i++ ) {
 // Sequence tracking
 let outgoing_sequence = 0; // Next command to send
 let incoming_sequence = 0; // Last acknowledged command from server
-let validsequence = 0; // Last valid server frame sequence (0 = no valid data yet)
+let validsequence = 0; // Last valid packet-entity server sequence (0 = no valid data yet)
 let server_sequence = 0; // Latest server frame sequence received (from svc_serversequence)
+let has_server_state = false; // Have authoritative local player state for prediction baseline
 
 // Predicted position (used for rendering)
 export const cl_simorg = new Float32Array( 3 ); // Simulated/predicted origin
@@ -227,8 +231,78 @@ Called when server acknowledges a command
 =================
 */
 export function CL_AcknowledgeCommand( sequence ) {
-	if ( sequence > incoming_sequence )
-		incoming_sequence = sequence;
+	const newestSent = outgoing_sequence - 1;
+	if ( newestSent < 0 )
+		return;
+
+	if ( sequence > newestSent )
+		sequence = newestSent;
+
+	if ( sequence <= incoming_sequence )
+		return;
+
+	const frame = frames[ sequence & UPDATE_MASK ];
+	if ( frame.sequence !== sequence )
+		return;
+
+	incoming_sequence = sequence;
+
+	if ( frame.senttime > 0 ) {
+
+		const observedRTT = realtime - frame.senttime;
+		if ( observedRTT >= 0 && observedRTT < 2.0 ) {
+
+			if ( cls_latency <= 0 ) {
+
+				cls_latency = observedRTT;
+
+			} else {
+
+				cls_latency = cls_latency * 0.75 + observedRTT * 0.25;
+
+			}
+
+		}
+
+	}
+}
+
+function _CL_SequenceGTE( sequence, baseline ) {
+
+	return ( ( sequence - baseline ) | 0 ) >= 0;
+
+}
+
+/*
+=================
+CL_AcknowledgeTransportSequence
+
+Map a transport-level packet ack to the newest predicted command sent
+in a packet with sequence <= transport ack.
+=================
+*/
+export function CL_AcknowledgeTransportSequence( transportAckSequence ) {
+
+	const newestSent = outgoing_sequence - 1;
+	if ( newestSent < 0 )
+		return;
+
+	const searchEnd = Math.max( incoming_sequence + 1, outgoing_sequence - UPDATE_BACKUP + 1 );
+	for ( let seq = newestSent; seq >= searchEnd; seq -- ) {
+
+		const frame = frames[ seq & UPDATE_MASK ];
+		if ( frame.sequence !== seq || frame.netsequence < 0 )
+			continue;
+
+		if ( _CL_SequenceGTE( transportAckSequence, frame.netsequence ) ) {
+
+			CL_AcknowledgeCommand( seq );
+			return;
+
+		}
+
+	}
+
 }
 
 /*
@@ -242,19 +316,29 @@ Returns the sequence number, or -1 if not found.
 =================
 */
 export function CL_FindAcknowledgedSequence( currentTime ) {
+	// Conservative ack estimate:
+	// 1) only consider commands old enough to have likely completed a round trip
+	// 2) never regress
+	// 3) never jump past the newest command we have sent
+	const newestSent = outgoing_sequence - 1;
+	if ( newestSent <= incoming_sequence )
+		return - 1;
 
-	// Measure latency: find the most recent command we sent before
-	// this server update. The time between sending that command and
-	// receiving the server response approximates RTT + server tick.
-	const searchStart = outgoing_sequence - 1;
-	const searchEnd = Math.max( 0, outgoing_sequence - UPDATE_BACKUP + 1 );
+	// Require a minimum age before assuming the server has processed a command.
+	// Without this guard, high send rates can incorrectly "ack" the newest command
+	// every frame, collapsing prediction.
+	let minAckAge = cls_latency > 0 ? cls_latency : 0.1;
+	if ( minAckAge < 0.02 ) minAckAge = 0.02;
+	if ( minAckAge > 1.0 ) minAckAge = 1.0;
+	const ackCutoffTime = currentTime - minAckAge;
 
-	// The most recently sent command before this server response
 	let bestSeq = - 1;
+	const searchStart = newestSent;
+	const searchEnd = Math.max( incoming_sequence + 1, outgoing_sequence - UPDATE_BACKUP + 1 );
 	for ( let seq = searchStart; seq >= searchEnd; seq -- ) {
 
 		const frame = frames[ seq & UPDATE_MASK ];
-		if ( frame.senttime > 0 && frame.senttime <= currentTime ) {
+		if ( frame.sequence === seq && frame.senttime > 0 && frame.senttime <= ackCutoffTime ) {
 
 			bestSeq = seq;
 			break;
@@ -263,35 +347,38 @@ export function CL_FindAcknowledgedSequence( currentTime ) {
 
 	}
 
-	// If we didn't find anything but have commands in flight,
-	// acknowledge at least some to prevent buffer overflow
-	if ( bestSeq < 0 && outgoing_sequence > UPDATE_BACKUP / 2 ) {
+	// Startup fallback: if latency estimate is still settling, advance by at most one
+	// command that has at least been sent before now.
+	if ( bestSeq < 0 ) {
 
-		bestSeq = outgoing_sequence - UPDATE_BACKUP / 2;
+		const nextSeq = incoming_sequence + 1;
+		if ( nextSeq <= newestSent ) {
+
+			const nextFrame = frames[ nextSeq & UPDATE_MASK ];
+			if ( nextFrame.sequence === nextSeq && nextFrame.senttime > 0 && nextFrame.senttime <= currentTime )
+				bestSeq = nextSeq;
+
+		}
 
 	}
 
-	// Update latency from the oldest unacknowledged command
-	// This command was sent before the server generated this response,
-	// so (currentTime - senttime) >= true RTT
-	if ( bestSeq >= 0 ) {
+	if ( bestSeq <= incoming_sequence )
+		return - 1;
 
-		const ackFrame = frames[ bestSeq & UPDATE_MASK ];
-		if ( ackFrame.senttime > 0 ) {
+	const ackFrame = frames[ bestSeq & UPDATE_MASK ];
+	if ( ackFrame.sequence === bestSeq && ackFrame.senttime > 0 ) {
 
-			const observedRTT = currentTime - ackFrame.senttime;
-			if ( observedRTT >= 0 && observedRTT < 2.0 ) {
+		const observedRTT = currentTime - ackFrame.senttime;
+		if ( observedRTT >= 0 && observedRTT < 2.0 ) {
 
-				// Exponential moving average
-				if ( cls_latency <= 0 ) {
+			// Exponential moving average
+			if ( cls_latency <= 0 ) {
 
-					cls_latency = observedRTT;
+				cls_latency = observedRTT;
 
-				} else {
+			} else {
 
-					cls_latency = cls_latency * 0.75 + observedRTT * 0.25;
-
-				}
+				cls_latency = cls_latency * 0.75 + observedRTT * 0.25;
 
 			}
 
@@ -310,7 +397,8 @@ CL_StoreCommand
 Store a command for prediction replay
 =================
 */
-export function CL_StoreCommand( cmd, senttime ) {
+export function CL_StoreCommand( cmd, senttime, netsequence = - 1 ) {
+	const sequence = outgoing_sequence;
 	const framenum = outgoing_sequence & UPDATE_MASK;
 	const frame = frames[ framenum ];
 
@@ -321,11 +409,13 @@ export function CL_StoreCommand( cmd, senttime ) {
 	frame.cmd.sidemove = cmd.sidemove;
 	frame.cmd.upmove = cmd.upmove;
 	frame.cmd.buttons = cmd.buttons;
+	frame.sequence = sequence;
+	frame.netsequence = netsequence;
 	frame.senttime = senttime;
 
 	outgoing_sequence++;
 
-	return framenum;
+	return sequence;
 }
 
 // Temporary player state for other-player prediction
@@ -369,9 +459,9 @@ export function CL_SetUpPlayerPrediction( dopred ) {
 	for ( let j = 0; j < MAX_CLIENTS; j++ ) {
 		const pplayer = predicted_players[ j ];
 
-		// Check if player was updated recently (within 2 seconds)
-		// This replaces the C code's state->messagenum != cl.parsecount check
-		if ( pplayer.msgtime <= 0 || ( realtime - pplayer.msgtime ) > 2.0 ) {
+		// QuakeWorld behavior: only consider players updated in the current
+		// server frame. This avoids stale players lingering as active.
+		if ( pplayer.serverSequence !== server_sequence ) {
 
 			pplayer.active = false;
 			continue;
@@ -434,42 +524,41 @@ Ported from QuakeWorld cl_ents.c
 =================
 */
 function CL_SetSolidEntities() {
-	// Start after world model (physent 0)
-	// Iterate through all entities and add brush models with collision hulls
-	for ( let i = 1; i < cl.num_entities; i++ ) {
-		const ent = cl_entities[ i ];
+	if ( validsequence === 0 )
+		return;
 
-		// Skip entities without models
-		if ( ent.model == null )
+	const eframe = entity_frames[ validsequence & UPDATE_MASK ];
+	if ( eframe.invalid )
+		return;
+
+	const pak = eframe.packet_entities;
+
+	// Build solid physents from the current packet-entity snapshot.
+	// This mirrors QuakeWorld's CL_SetSolidEntities, which uses the
+	// authoritative frame data rather than potentially stale cl_entities.
+	for ( let i = 0; i < pak.num_entities; i++ ) {
+		const state = pak.entities[ i ];
+		if ( state.modelindex === 0 )
 			continue;
 
-		// Skip if not a brush model (type 0 = mod_brush)
-		if ( ent.model.type !== 0 )
+		const model = cl.model_precache[ state.modelindex ];
+		if ( model == null )
 			continue;
 
-		// Check if model has collision hull data (hulls[1] for player-sized collision)
-		// Brush models with collision have firstclipnode set to a valid node index
-		const hull = ent.model.hulls[ 1 ];
+		const hull = model.hulls[ 1 ];
 		if ( hull == null )
 			continue;
 
-		// QuakeWorld checks: hulls[1].firstclipnode || clipbox
-		// For brush submodels, firstclipnode will be set to the headnode
-		// A value of 0 with lastclipnode also 0 means no collision data
-		if ( hull.firstclipnode === 0 && hull.lastclipnode === 0 && hull.clipnodes == null )
+		if ( ! hull.firstclipnode && ! model.clipbox )
 			continue;
 
-		// Add this brush entity as a physics collision object
 		if ( pmove.numphysent >= pmove.physents.length )
 			break;
 
 		const pent = pmove.physents[ pmove.numphysent ];
-		pent.model = ent.model;
-		pent.origin[ 0 ] = ent.origin[ 0 ];
-		pent.origin[ 1 ] = ent.origin[ 1 ];
-		pent.origin[ 2 ] = ent.origin[ 2 ];
-		pent.info = i;
-
+		pent.model = model;
+		VectorCopy( state.origin, pent.origin );
+		pent.info = state.number;
 		pmove.numphysent++;
 	}
 }
@@ -498,7 +587,7 @@ function CL_SetupPMove() {
 	CL_SetUpPlayerPrediction( true );
 
 	// Add other players as physics entities for collision
-	CL_SetSolidPlayers( cl.viewentity );
+	CL_SetSolidPlayers( cl.viewentity - 1 );
 }
 
 /*
@@ -515,7 +604,7 @@ function CL_SetSolidPlayers( playernum ) {
 		return;
 
 	// Use predicted player positions
-	for ( let j = 1; j < MAX_CLIENTS; j++ ) {
+	for ( let j = 0; j < MAX_CLIENTS; j++ ) {
 		const pplayer = predicted_players[ j ];
 
 		// Skip inactive players
@@ -579,7 +668,8 @@ export function CL_SetPlayerInfo( playernum, origin, velocity, frame, flags, ski
 
 	const pplayer = predicted_players[ playernum ];
 	pplayer.active = true;
-	pplayer.msgtime = realtime;
+	pplayer.msgtime = realtime - msec * 0.001;
+	pplayer.serverSequence = server_sequence;
 
 	VectorCopy( origin, pplayer.origin );
 	VectorCopy( velocity, pplayer.velocity );
@@ -759,8 +849,8 @@ export function CL_PredictMove() {
 	if ( cl.intermission !== 0 )
 		return;
 
-	// Check if we have valid server data to predict from
-	if ( validsequence === 0 )
+	// Check if we have authoritative local-player state to predict from
+	if ( has_server_state === false )
 		return;
 
 	// Check if we have valid frames to predict from
@@ -851,6 +941,7 @@ export function CL_SetServerState( origin, velocity, onground ) {
 	VectorCopy( origin, frame.playerstate.origin );
 	VectorCopy( velocity, frame.playerstate.velocity );
 	frame.playerstate.onground = onground;
+	has_server_state = true;
 }
 
 /*
@@ -879,6 +970,7 @@ export function CL_ResetPrediction() {
 	incoming_sequence = 0;
 	validsequence = 0;
 	server_sequence = 0;
+	has_server_state = false;
 	cls_latency = 0;
 
 	cl_simorg.fill( 0 );
@@ -888,6 +980,8 @@ export function CL_ResetPrediction() {
 	cl_prediction_active = false;
 
 	for ( let i = 0; i < UPDATE_BACKUP; i++ ) {
+		frames[ i ].sequence = - 1;
+		frames[ i ].netsequence = - 1;
 		frames[ i ].senttime = 0;
 		frames[ i ].playerstate.origin.fill( 0 );
 		frames[ i ].playerstate.velocity.fill( 0 );

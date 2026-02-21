@@ -20,6 +20,14 @@ let wt_initialized = false;
 // This should be long enough for slow connections but short enough to not hang indefinitely
 const ROOM_JOIN_TIMEOUT_MS = 10000; // 10 seconds
 
+// Deno's WebTransport datagram receive path can wedge room processes when many
+// rooms/clients send clc_move over datagrams concurrently. Keep client->server
+// traffic on the reliable stream for stability, while still receiving server
+// datagrams for entity updates.
+const USE_CLIENT_OUTBOUND_DATAGRAMS = false;
+const WT_PACKET_MAGIC = 0x71;
+const WT_PACKET_HEADER_BYTES = 9; // [magic:u8][sequence:u32][acknowledged:u32]
+
 // Active connections
 const wt_connections = new Map(); // qsocket_t -> WebTransportConnection
 
@@ -33,21 +41,74 @@ class WebTransportConnection {
 
 		this.transport = transport;
 
-		// TWO-STREAM PROTOCOL:
-		// Stream 1 (reliable): signon messages, stringcmds
-		// Stream 2 (unreliable): entity updates, movement
+		// Transport protocol:
+		// - Reliable bidirectional stream: signon messages, stringcmds
+		// - Unreliable datagrams: entity updates, movement
 		this.reliableStream = null;
 		this.reliableWriter = null;
 		this.reliableReader = null;
-		this.unreliableStream = null;
-		this.unreliableWriter = null;
-		this.unreliableReader = null;
+		this.datagramWriter = null;
+		this.datagramReader = null;
+		this.maxDatagramSize = 0;
 
 		this.pendingMessages = []; // { reliable: boolean, data: Uint8Array }
 		this.connected = false;
 		this.error = null;
 
 	}
+
+}
+
+function _isNewerSequence( sequence, current ) {
+
+	return ( ( sequence - current ) | 0 ) > 0;
+
+}
+
+function _WT_BuildSequencedPacket( sock, data, dataLength, forceHeader = false ) {
+
+	if ( forceHeader !== true && ( sock.receiveSequence | 0 ) < 0 ) {
+
+		const legacyPacket = new Uint8Array( dataLength );
+		legacyPacket.set( data.subarray( 0, dataLength ), 0 );
+		return legacyPacket;
+
+	}
+
+	const packet = new Uint8Array( WT_PACKET_HEADER_BYTES + dataLength );
+	const view = new DataView( packet.buffer, packet.byteOffset, packet.byteLength );
+
+	const sequence = sock.sendSequence | 0;
+	const acknowledged = sock.receiveSequence | 0;
+
+	packet[ 0 ] = WT_PACKET_MAGIC;
+	view.setUint32( 1, sequence >>> 0, true );
+	view.setUint32( 5, acknowledged >>> 0, true );
+	packet.set( data.subarray( 0, dataLength ), WT_PACKET_HEADER_BYTES );
+
+	sock.sendSequence = ( sequence + 1 ) | 0;
+
+	return packet;
+
+}
+
+function _WT_ParseSequencedPacket( sock, packet ) {
+
+	if ( packet.length < WT_PACKET_HEADER_BYTES || packet[ 0 ] !== WT_PACKET_MAGIC )
+		return packet;
+
+	const view = new DataView( packet.buffer, packet.byteOffset, packet.byteLength );
+	const sequence = view.getUint32( 1, true ) | 0;
+	const acknowledged = view.getUint32( 5, true ) | 0;
+
+	if ( _isNewerSequence( acknowledged, sock.ackSequence | 0 ) )
+		sock.ackSequence = acknowledged;
+
+	if ( _isNewerSequence( sequence, sock.receiveSequence | 0 ) === false )
+		return null;
+
+	sock.receiveSequence = sequence;
+	return packet.subarray( WT_PACKET_HEADER_BYTES );
 
 }
 
@@ -539,6 +600,16 @@ export async function WT_Connect( host ) {
 
 	Con_Printf( 'WebTransport connecting to ' + url + ( roomId ? ' (room: ' + roomId + ')' : '' ) + '\n' );
 
+	// Direct room server connection (no lobby join parameter) should not
+	// open an initial throwaway transport. Doing so creates a ghost server
+	// client that times out later and can wedge unreliable datagram sends.
+	if ( roomId == null ) {
+
+		Con_Printf( 'No room ID, using direct connection\n' );
+		return await _WT_ConnectDirect( url, host );
+
+	}
+
 	try {
 
 		// Create the WebTransport connection
@@ -669,7 +740,7 @@ export async function WT_Connect( host ) {
 			}
 
 			// Server responded but didn't redirect - use same-port direct connection
-			// Close lobby connection and reconnect with two-stream protocol
+			// Close lobby connection and reconnect with game transport protocol
 			Con_Printf( 'Room on same port, reconnecting...\n' );
 			transport.close();
 			NET_FreeQSocket( sock );
@@ -677,14 +748,7 @@ export async function WT_Connect( host ) {
 
 		}
 
-		// No room ID - connect directly using two-stream protocol
-		// (This path is for direct server connections without lobby)
-		Con_Printf( 'No room ID, using direct connection\n' );
-		transport.close();
-		NET_FreeQSocket( sock );
-		return await _WT_ConnectDirect( url, host );
-
-	} catch ( error ) {
+		} catch ( error ) {
 
 		Con_Printf( 'WebTransport connect failed: ' + error.message + '\n' );
 
@@ -713,10 +777,10 @@ _WT_ConnectDirect
 Connect directly to a room server (no lobby protocol)
 Used when redirected from lobby to a room server on a different port
 
-TWO-STREAM PROTOCOL:
-- Stream 1 (reliable): signon messages, stringcmds
-- Stream 2 (unreliable): entity updates, movement
-Frame format: [length:2][data...]
+Transport protocol:
+- Reliable stream: [length:2][transport_packet]
+- Unreliable datagrams: transport_packet
+  transport_packet: [magic:1][sequence:4][ack:4][quake_payload...]
 =============
 */
 async function _WT_ConnectDirect( url, originalHost, roomId = null ) {
@@ -745,26 +809,35 @@ async function _WT_ConnectDirect( url, originalHost, roomId = null ) {
 
 		sock.address = originalHost;
 		sock.driver = net_driverlevel;
+		sock.sendSequence = 0;
+		sock.receiveSequence = - 1;
+		sock.ackSequence = - 1;
 
 		// Create connection data
 		const conn = new WebTransportConnection( transport );
 		conn.connected = true;
 
-		// TWO-STREAM PROTOCOL:
-		// Stream 1 (reliable): signon messages, stringcmds
-		// Stream 2 (unreliable): entity updates, movement
-
-		// Create first bidirectional stream (reliable channel)
+		// Reliable stream: signon messages, stringcmds
 		conn.reliableStream = await transport.createBidirectionalStream();
 		conn.reliableWriter = conn.reliableStream.writable.getWriter();
 		conn.reliableReader = conn.reliableStream.readable.getReader();
 		Con_Printf( 'Reliable stream ready\n' );
 
-		// Create second bidirectional stream (unreliable channel)
-		conn.unreliableStream = await transport.createBidirectionalStream();
-		conn.unreliableWriter = conn.unreliableStream.writable.getWriter();
-		conn.unreliableReader = conn.unreliableStream.readable.getReader();
-		Con_Printf( 'Unreliable stream ready\n' );
+		// Unreliable channel: WebTransport datagrams
+		if ( transport.datagrams == null ) {
+
+			throw new Error( 'WebTransport datagrams unavailable' );
+
+		}
+		conn.datagramWriter = transport.datagrams.writable.getWriter();
+		conn.datagramReader = transport.datagrams.readable.getReader();
+		const maxDatagramSize = transport.datagrams.maxDatagramSize;
+		if ( typeof maxDatagramSize === 'number' ) {
+
+			conn.maxDatagramSize = maxDatagramSize;
+
+		}
+		Con_Printf( 'Datagram channel ready\n' );
 
 		// Store connection
 		sock.driverdata = conn;
@@ -828,16 +901,12 @@ async function _WT_ConnectDirect( url, originalHost, roomId = null ) {
 =============
 _WT_StartBackgroundReaders
 
-Start background readers for both streams
-
-TWO-STREAM PROTOCOL:
-- Stream 1 (reliable): signon messages, stringcmds - frame format: [length:2][data...]
-- Stream 2 (unreliable): entity updates, movement - frame format: [length:2][data...]
+Start background readers for reliable stream + unreliable datagrams
 =============
 */
 function _WT_StartBackgroundReaders( sock, conn ) {
 
-	Con_Printf( 'Starting stream readers...\n' );
+	Con_Printf( 'Starting reliable stream and datagram readers...\n' );
 
 	// Reliable stream reader
 	( async () => {
@@ -884,36 +953,18 @@ function _WT_StartBackgroundReaders( sock, conn ) {
 
 	} )();
 
-	// Unreliable stream reader
+	// Unreliable datagram reader
 	( async () => {
-
-		let buffer = new Uint8Array( 0 );
 
 		try {
 
-			while ( conn.connected && conn.unreliableReader ) {
+			while ( conn.connected && conn.datagramReader ) {
 
-				const { value, done } = await conn.unreliableReader.read();
-				if ( done || value === undefined || value.length === 0 ) break;
+				const { value, done } = await conn.datagramReader.read();
+				if ( done ) break;
+				if ( value === undefined || value.length === 0 ) continue;
 
-				// Append to buffer
-				const newBuffer = new Uint8Array( buffer.length + value.length );
-				newBuffer.set( buffer );
-				newBuffer.set( value, buffer.length );
-				buffer = newBuffer;
-
-				// Process complete frames: [length:2][data...]
-				while ( buffer.length >= 2 ) {
-
-					const length = buffer[ 0 ] | ( buffer[ 1 ] << 8 );
-					if ( buffer.length < 2 + length ) break;
-
-					const data = buffer.subarray( 2, 2 + length );
-					buffer = buffer.subarray( 2 + length );
-
-					conn.pendingMessages.push( { reliable: false, data: new Uint8Array( data ) } );
-
-				}
+				conn.pendingMessages.push( { reliable: false, data: new Uint8Array( value ) } );
 
 			}
 
@@ -921,7 +972,7 @@ function _WT_StartBackgroundReaders( sock, conn ) {
 
 			if ( conn.connected ) {
 
-				Con_DPrintf( 'Unreliable reader error: ' + error.message + '\n' );
+				Con_DPrintf( 'Datagram reader error: ' + error.message + '\n' );
 
 			}
 
@@ -1095,39 +1146,46 @@ export function WT_QGetMessage( sock ) {
 
 	}
 
-	if ( conn.pendingMessages.length === 0 ) {
+	while ( conn.pendingMessages.length > 0 ) {
 
-		return 0;
+		// Get next message
+		let msg = conn.pendingMessages.shift();
 
-	}
+		// For unreliable messages, skip to the most recent one.
+		// In original Quake, unreliable messages are overwritten by newer ones.
+		// The WebTransport datagram reader queues all datagrams, so if the
+		// sender is faster than the reader, stale messages pile up.
+		if ( msg.reliable === false ) {
 
-	// Get next message
-	let msg = conn.pendingMessages.shift();
+			while ( conn.pendingMessages.length > 0 ) {
 
-	// For unreliable messages, skip to the most recent one.
-	// In original Quake, unreliable messages are overwritten by newer ones.
-	// The WebTransport datagram reader queues all datagrams, so if the
-	// sender is faster than the reader, stale messages pile up.
-	if ( msg.reliable === false ) {
+				const next = conn.pendingMessages[ 0 ];
+				if ( next.reliable ) break; // Stop at next reliable message
+				conn.pendingMessages.shift();
+				msg = next; // Use newer unreliable message
 
-		while ( conn.pendingMessages.length > 0 ) {
-
-			const next = conn.pendingMessages[ 0 ];
-			if ( next.reliable ) break; // Stop at next reliable message
-			conn.pendingMessages.shift();
-			msg = next; // Use newer unreliable message
+			}
 
 		}
 
+		const payload = _WT_ParseSequencedPacket( sock, msg.data );
+		if ( payload == null )
+			continue;
+
+		// Copy to net_message
+		SZ_Clear( net_message );
+		SZ_Write( net_message, payload, payload.length );
+
+		sock.lastMessageTime = performance.now() / 1000;
+
+		return msg.reliable ? 1 : 2;
+
 	}
 
-	// Copy to net_message
-	SZ_Clear( net_message );
-	SZ_Write( net_message, msg.data, msg.data.length );
+	if ( conn.connected )
+		return 0;
 
-	sock.lastMessageTime = performance.now() / 1000;
-
-	return msg.reliable ? 1 : 2;
+	return - 1;
 
 }
 
@@ -1162,10 +1220,11 @@ export function WT_QSendMessage( sock, data ) {
 	}
 
 	// Frame the message: [length:2][data...]
-	const frame = new Uint8Array( 2 + data.cursize );
-	frame[ 0 ] = data.cursize & 0xff;
-	frame[ 1 ] = ( data.cursize >> 8 ) & 0xff;
-	frame.set( data.data.subarray( 0, data.cursize ), 2 );
+	const packet = _WT_BuildSequencedPacket( sock, data.data, data.cursize, true );
+	const frame = new Uint8Array( 2 + packet.length );
+	frame[ 0 ] = packet.length & 0xff;
+	frame[ 1 ] = ( packet.length >> 8 ) & 0xff;
+	frame.set( packet, 2 );
 
 	// Send asynchronously - QUIC handles reliability
 	conn.reliableWriter.write( frame ).catch( ( error ) => {
@@ -1184,8 +1243,7 @@ export function WT_QSendMessage( sock, data ) {
 =============
 WT_SendUnreliableMessage
 
-Send an unreliable message via the unreliable stream.
-Frame format: [length:2][data...]
+Send an unreliable message via WebTransport datagrams.
 =============
 */
 export function WT_SendUnreliableMessage( sock, data ) {
@@ -1206,21 +1264,31 @@ export function WT_SendUnreliableMessage( sock, data ) {
 
 	}
 
-	if ( conn.unreliableWriter == null ) {
+	// Stability fallback: send client commands on reliable stream.
+	if ( USE_CLIENT_OUTBOUND_DATAGRAMS !== true ) {
 
-		Con_DPrintf( 'WT_SendUnreliableMessage: no unreliableWriter\n' );
+		return WT_QSendMessage( sock, data );
+
+	}
+
+	if ( conn.datagramWriter == null ) {
+
+		Con_DPrintf( 'WT_SendUnreliableMessage: no datagramWriter\n' );
 		return - 1;
 
 	}
 
-	// Frame the message: [length:2][data...]
-	const frame = new Uint8Array( 2 + data.cursize );
-	frame[ 0 ] = data.cursize & 0xff;
-	frame[ 1 ] = ( data.cursize >> 8 ) & 0xff;
-	frame.set( data.data.subarray( 0, data.cursize ), 2 );
+	const packet = _WT_BuildSequencedPacket( sock, data.data, data.cursize, true );
 
-	// Send via unreliable stream
-	conn.unreliableWriter.write( frame ).catch( () => {
+	if ( conn.maxDatagramSize > 0 && packet.length > conn.maxDatagramSize ) {
+
+		// Datagram too large for current path MTU — drop unreliable payload.
+		return 1;
+
+	}
+
+	// Send via unreliable datagrams
+	conn.datagramWriter.write( packet ).catch( () => {
 
 		// Unreliable — silently fail
 
@@ -1242,7 +1310,7 @@ export function WT_CanSendMessage( sock ) {
 	const conn = sock.driverdata;
 	if ( ! conn ) return false;
 
-	return conn.connected;
+	return conn.connected && conn.reliableWriter != null;
 
 }
 
@@ -1258,7 +1326,13 @@ export function WT_CanSendUnreliableMessage( sock ) {
 	const conn = sock.driverdata;
 	if ( ! conn ) return false;
 
-	return conn.connected;
+	if ( USE_CLIENT_OUTBOUND_DATAGRAMS !== true ) {
+
+		return WT_CanSendMessage( sock );
+
+	}
+
+	return conn.connected && conn.datagramWriter != null;
 
 }
 
@@ -1286,10 +1360,10 @@ export function WT_Close( sock ) {
 
 		}
 
-		if ( conn.unreliableReader ) {
+		if ( conn.datagramReader ) {
 
-			conn.unreliableReader.cancel().catch( () => {} );
-			conn.unreliableReader = null;
+			conn.datagramReader.cancel().catch( () => {} );
+			conn.datagramReader = null;
 
 		}
 
@@ -1301,10 +1375,10 @@ export function WT_Close( sock ) {
 
 		}
 
-		if ( conn.unreliableWriter ) {
+		if ( conn.datagramWriter ) {
 
-			conn.unreliableWriter.close().catch( () => {} );
-			conn.unreliableWriter = null;
+			conn.datagramWriter.releaseLock();
+			conn.datagramWriter = null;
 
 		}
 
