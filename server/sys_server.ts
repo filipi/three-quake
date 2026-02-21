@@ -11,8 +11,6 @@ export function Sys_Error(error: string): never {
 }
 
 const _quietLogAllowPatterns: RegExp[] = [
-	/\[Heartbeat\]/,
-	/\[WATCHDOG\]/,
 	/^Connection from /,
 	/^Connection closed:/,
 	/^Client .*(connected|removed)\b/,

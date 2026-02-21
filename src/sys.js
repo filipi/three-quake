@@ -30,8 +30,6 @@ export function Sys_Error( error ) {
 }
 
 const _quietLogAllowPatterns = [
-	/\[Heartbeat\]/,
-	/\[WATCHDOG\]/,
 	/^Connection from /,
 	/^Connection closed:/,
 	/^Client .*(connected|removed)\b/,
